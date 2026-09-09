@@ -178,6 +178,26 @@ def test_manifest_model_and_schema_agree_on_leading_zero_port() -> None:
 
 
 @pytest.mark.parametrize(
+    ("url", "accepted"),
+    [
+        (" https://bilibili.com/v", False),
+        ("\x00https://bilibili.com/v", False),
+        ("ht\ntps://bilibili.com/v", False),
+        ("https:\n//bilibili.com/v", False),
+        ("https://bilibili.com/v ", False),
+        ("https://bilibili.com/v\t", False),
+        ("https://bilibili.com/path with space", False),
+        ("https://bilibili.com/v\x7f", False),
+        ("https://bilibili.com/path%20with%20space", True),
+    ],
+)
+def test_manifest_model_and_schema_agree_on_raw_url_controls(url: str, accepted: bool) -> None:
+    document = manifest_document(url)
+    assert model_accepts_manifest(document) is accepted
+    assert schema_accepts_manifest(document) is accepted
+
+
+@pytest.mark.parametrize(
     ("platform", "url"),
     [
         ("bilibili", "http://www.bilibili.com/video/BV1test"),

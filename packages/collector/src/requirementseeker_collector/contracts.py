@@ -68,6 +68,8 @@ _PORT_PATTERN = (
 def _https_url(value: object) -> object:
     if not isinstance(value, str):
         raise ValueError("url_must_be_valid")
+    if re.search(r"[\x00-\x20\x7f]", value) is not None:
+        raise ValueError("url_must_not_include_raw_controls_or_spaces")
     try:
         parsed = urlsplit(value)
         host = parsed.hostname
@@ -184,7 +186,7 @@ def _platform_url_pattern(hosts: tuple[str, ...]) -> str:
     roots = "|".join(_ascii_case_insensitive_literal(host) for host in hosts)
     return (
         rf"^{scheme}://(?:{_DNS_LABEL_PATTERN}\.)*"
-        rf"(?:{roots})(?::{_PORT_PATTERN})?(?:[/?#]|$)"
+        rf"(?:{roots})(?::{_PORT_PATTERN})?(?:[/?#][^\x00-\x20\x7f]*)?$"
     )
 
 
