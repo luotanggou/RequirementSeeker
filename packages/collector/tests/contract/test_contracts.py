@@ -228,11 +228,17 @@ def test_manifest_urls_require_https(url: str) -> None:
         ManifestVideo.model_validate(manifest_video_data(url=url))
 
 
-def test_manifest_urls_reject_credentials() -> None:
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:secret@www.bilibili.com/video/BV1test",
+        "https://@bilibili.com/x",
+        "https://:@bilibili.com/x",
+    ],
+)
+def test_manifest_urls_reject_credentials(url: str) -> None:
     with pytest.raises(ValidationError, match="url_must_not_include_credentials"):
-        ManifestVideo.model_validate(
-            manifest_video_data(url="https://user:secret@www.bilibili.com/video/BV1test")
-        )
+        ManifestVideo.model_validate(manifest_video_data(url=url))
 
 
 def test_manifest_video_python_dump_can_be_revalidated() -> None:

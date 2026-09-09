@@ -75,6 +75,8 @@ def _https_url(value: object) -> object:
         raise ValueError("url_must_be_valid") from None
     if parsed.scheme.lower() != "https":
         raise ValueError("url_must_use_https")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("url_must_not_include_credentials")
     if host is None or re.fullmatch(_DNS_HOST_PATTERN, host) is None:
         raise ValueError("url_host_must_use_ascii_dns_labels")
     host_and_port = parsed.netloc.rsplit("@", 1)[-1]
