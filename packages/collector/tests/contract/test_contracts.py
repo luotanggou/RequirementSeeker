@@ -237,18 +237,23 @@ def test_manifest_urls_reject_credentials() -> None:
 
 def test_manifest_video_python_dump_can_be_revalidated() -> None:
     video = ManifestVideo.model_validate(manifest_video_data())
-    assert ManifestVideo.model_validate(video.model_dump()) == video
+    dumped = video.model_dump()
+    assert type(dumped["url"]) is str
+    assert ManifestVideo.model_validate(dumped) == video
 
 
 @pytest.mark.parametrize(
     "url",
     [
+        "https://www.bilibili.com/video/BV1",
+        "https://%62ilibili.com/video/BV1",
+        "https://evil%2ebilibili.com/video/BV1",
         "https://foo_bar.bilibili.com/video/BV1",
         "https://-foo.bilibili.com/video/BV1",
         "https://foo-.bilibili.com/video/BV1",
     ],
 )
-def test_manifest_rejects_preparsed_urls_with_invalid_dns_labels(url: str) -> None:
+def test_manifest_rejects_preparsed_urls(url: str) -> None:
     with pytest.raises(ValidationError):
         ManifestVideo.model_validate(manifest_video_data(url=HttpUrl(url)))
 

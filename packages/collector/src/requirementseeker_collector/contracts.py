@@ -13,6 +13,7 @@ from pydantic import (
     ConfigDict,
     Field,
     HttpUrl,
+    PlainSerializer,
     StrictBool,
     model_validator,
 )
@@ -65,10 +66,10 @@ _PORT_PATTERN = (
 
 
 def _https_url(value: object) -> object:
-    if not isinstance(value, (str, HttpUrl)):
+    if not isinstance(value, str):
         raise ValueError("url_must_be_valid")
     try:
-        parsed = urlsplit(str(value))
+        parsed = urlsplit(value)
         host = parsed.hostname
     except ValueError:
         raise ValueError("url_must_be_valid") from None
@@ -90,10 +91,15 @@ def _url_without_credentials(value: HttpUrl) -> HttpUrl:
     return value
 
 
+def _serialize_url(value: HttpUrl) -> str:
+    return str(value)
+
+
 PublicHttpUrl = Annotated[
     HttpUrl,
     BeforeValidator(_https_url),
     AfterValidator(_url_without_credentials),
+    PlainSerializer(_serialize_url, return_type=str),
 ]
 
 
