@@ -258,7 +258,7 @@ git commit -m "feat(collector): add deterministic collection planning"
 - Create: `packages/collector/src/requirementseeker_collector/merge.py`
 - Create: `packages/collector/tests/test_merge.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_same_comment_is_updated_once() -> None:
@@ -281,13 +281,13 @@ def test_conflict_inside_one_run_rejects_generation() -> None:
         merge_current_run([comment("c1"), comment("c1", text="changed")])
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/test_merge.py -q`
 
 Expected: import fails because `merge.py` is absent.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Implement `MergeResult(comments, conflicts, exact_duplicate_count)`, compare only `raw_author_id` and `text` for immutable identity conflicts, update mutable metadata from a consistent rerun, and sort output by `raw_comment_id`. Identical duplicate records increment `exact_duplicate_count`; the runner adds that many `exact_duplicate_merged` audit entries without copying content. Conflicting duplicates raise `CurrentRunConflict` before files are written.
 
@@ -309,13 +309,13 @@ def merge_comments(previous: Sequence[RawComment], current: Sequence[RawComment]
     return MergeResult(sorted(merged.values(), key=attrgetter("raw_comment_id")), conflicts)
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/test_merge.py -q`
 
 Expected: all merge and conflict cases pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector/src/requirementseeker_collector/merge.py packages/collector/tests/test_merge.py
