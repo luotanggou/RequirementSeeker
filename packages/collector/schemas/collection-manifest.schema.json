@@ -17,7 +17,7 @@
           "then": {
             "properties": {
               "url": {
-                "pattern": "^https://(?:[^@/?#]+\\.)*(?:bilibili\\.com|b23\\.tv)(?::\\d+)?(?:[/?#]|$)"
+                "pattern": "^[Hh][Tt][Tt][Pp][Ss]://(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)*(?:[Bb][Ii][Ll][Ii][Bb][Ii][Ll][Ii]\\.[Cc][Oo][Mm]|[Bb]23\\.[Tt][Vv])(?::\\d+)?(?:[/?#]|$)"
               }
             }
           }
@@ -36,7 +36,7 @@
           "then": {
             "properties": {
               "url": {
-                "pattern": "^https://(?:[^@/?#]+\\.)*(?:douyin\\.com|iesdouyin\\.com)(?::\\d+)?(?:[/?#]|$)"
+                "pattern": "^[Hh][Tt][Tt][Pp][Ss]://(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)*(?:[Dd][Oo][Uu][Yy][Ii][Nn]\\.[Cc][Oo][Mm]|[Ii][Ee][Ss][Dd][Oo][Uu][Yy][Ii][Nn]\\.[Cc][Oo][Mm])(?::\\d+)?(?:[/?#]|$)"
               }
             }
           }
@@ -62,7 +62,6 @@
           "format": "uri",
           "maxLength": 2083,
           "minLength": 1,
-          "pattern": "^https://(?![^/?#]*@)",
           "title": "Url",
           "type": "string"
         },

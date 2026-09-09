@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from requirementseeker_collector import (
     CollectionManifest,
@@ -99,6 +99,34 @@ def test_committed_schema_matches_generated_schema(kind: str) -> None:
 def test_valid_documents_pass_standard_json_schema(kind: str) -> None:
     schema = json.loads((ROOT / "schemas" / f"{kind}.schema.json").read_text(encoding="utf-8"))
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(VALID_DOCUMENTS[kind])
+
+
+@pytest.mark.parametrize(
+    ("platform", "url"),
+    [
+        ("bilibili", "HTTPS://WWW.BILIBILI.COM/video/BV1"),
+        ("bilibili", "https://WWW.BILIBILI.COM/video/BV1"),
+        ("douyin", "HTTPS://WWW.DOUYIN.COM/video/1"),
+        ("douyin", "https://WWW.IESDOUYIN.COM/share/video/1"),
+    ],
+)
+def test_manifest_model_and_schema_accept_case_insensitive_urls(platform: str, url: str) -> None:
+    schema = export_schema("collection-manifest")
+    document = json.loads(json.dumps(VALID_DOCUMENTS["collection-manifest"]))
+    document["videos"][0]["platform"] = platform
+    document["videos"][0]["url"] = url
+    CollectionManifest.model_validate(document)
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(document)
+
+
+def test_manifest_model_and_schema_reject_invalid_dns_label() -> None:
+    schema = export_schema("collection-manifest")
+    document = json.loads(json.dumps(VALID_DOCUMENTS["collection-manifest"]))
+    document["videos"][0]["url"] = "https://user%40evil.bilibili.com/video/BV1"
+    with pytest.raises(ValidationError):
+        CollectionManifest.model_validate(document)
+    with pytest.raises(JsonSchemaValidationError):
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(document)
 
 
 @pytest.mark.parametrize(

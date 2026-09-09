@@ -79,7 +79,6 @@ PublicHttpUrl = Annotated[
     HttpUrl,
     BeforeValidator(_https_url),
     AfterValidator(_url_without_credentials),
-    Field(json_schema_extra={"pattern": r"^https://(?![^/?#]*@)"}),
 ]
 
 
@@ -146,6 +145,25 @@ _PLATFORM_HOSTS: dict[Platform, tuple[str, ...]] = {
     "bilibili": ("bilibili.com", "b23.tv"),
     "douyin": ("douyin.com", "iesdouyin.com"),
 }
+_DNS_LABEL_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+
+
+def _ascii_case_insensitive_literal(value: str) -> str:
+    return "".join(
+        f"[{character.upper()}{character.lower()}]"
+        if character.isascii() and character.isalpha()
+        else re.escape(character)
+        for character in value
+    )
+
+
+def _platform_url_pattern(hosts: tuple[str, ...]) -> str:
+    scheme = _ascii_case_insensitive_literal("https")
+    roots = "|".join(_ascii_case_insensitive_literal(host) for host in hosts)
+    return (
+        rf"^{scheme}://(?:{_DNS_LABEL_PATTERN}\.)*"
+        rf"(?:{roots})(?::\d+)?(?:[/?#]|$)"
+    )
 
 
 class ManifestVideo(Contract):
@@ -160,10 +178,7 @@ class ManifestVideo(Contract):
                     "then": {
                         "properties": {
                             "url": {
-                                "pattern": (
-                                    r"^https://(?:[^@/?#]+\.)*"
-                                    r"(?:bilibili\.com|b23\.tv)(?::\d+)?(?:[/?#]|$)"
-                                )
+                                "pattern": _platform_url_pattern(_PLATFORM_HOSTS["bilibili"])
                             }
                         }
                     },
@@ -176,10 +191,7 @@ class ManifestVideo(Contract):
                     "then": {
                         "properties": {
                             "url": {
-                                "pattern": (
-                                    r"^https://(?:[^@/?#]+\.)*"
-                                    r"(?:douyin\.com|iesdouyin\.com)(?::\d+)?(?:[/?#]|$)"
-                                )
+                                "pattern": _platform_url_pattern(_PLATFORM_HOSTS["douyin"])
                             }
                         }
                     },
