@@ -56,12 +56,31 @@ def _utc(value: datetime) -> datetime:
 
 Timestamp = Annotated[AwareDatetime, BeforeValidator(_timestamp), AfterValidator(_utc)]
 
+_DNS_LABEL_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_DNS_HOST_PATTERN = rf"{_DNS_LABEL_PATTERN}(?:\.{_DNS_LABEL_PATTERN})*"
+_PORT_PATTERN = (
+    r"0*(?:[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|"
+    r"65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])"
+)
+
 
 def _https_url(value: object) -> object:
     if isinstance(value, HttpUrl):
         scheme = value.scheme
     elif isinstance(value, str):
-        scheme = urlsplit(value).scheme
+        try:
+            parsed = urlsplit(value)
+            host = parsed.hostname
+        except ValueError:
+            raise ValueError("url_must_be_valid") from None
+        scheme = parsed.scheme
+        if host is None or re.fullmatch(_DNS_HOST_PATTERN, host) is None:
+            raise ValueError("url_host_must_use_ascii_dns_labels")
+        host_and_port = parsed.netloc.rsplit("@", 1)[-1]
+        if ":" in host_and_port:
+            raw_port = host_and_port.rsplit(":", 1)[-1]
+            if re.fullmatch(_PORT_PATTERN, raw_port) is None:
+                raise ValueError("url_port_must_be_between_0_and_65535")
     else:
         scheme = ""
     if scheme.lower() != "https":
@@ -145,7 +164,6 @@ _PLATFORM_HOSTS: dict[Platform, tuple[str, ...]] = {
     "bilibili": ("bilibili.com", "b23.tv"),
     "douyin": ("douyin.com", "iesdouyin.com"),
 }
-_DNS_LABEL_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
 
 
 def _ascii_case_insensitive_literal(value: str) -> str:
@@ -162,7 +180,7 @@ def _platform_url_pattern(hosts: tuple[str, ...]) -> str:
     roots = "|".join(_ascii_case_insensitive_literal(host) for host in hosts)
     return (
         rf"^{scheme}://(?:{_DNS_LABEL_PATTERN}\.)*"
-        rf"(?:{roots})(?::\d+)?(?:[/?#]|$)"
+        rf"(?:{roots})(?::{_PORT_PATTERN})?(?:[/?#]|$)"
     )
 
 
@@ -177,9 +195,7 @@ class ManifestVideo(Contract):
                     },
                     "then": {
                         "properties": {
-                            "url": {
-                                "pattern": _platform_url_pattern(_PLATFORM_HOSTS["bilibili"])
-                            }
+                            "url": {"pattern": _platform_url_pattern(_PLATFORM_HOSTS["bilibili"])}
                         }
                     },
                 },
@@ -190,9 +206,7 @@ class ManifestVideo(Contract):
                     },
                     "then": {
                         "properties": {
-                            "url": {
-                                "pattern": _platform_url_pattern(_PLATFORM_HOSTS["douyin"])
-                            }
+                            "url": {"pattern": _platform_url_pattern(_PLATFORM_HOSTS["douyin"])}
                         }
                     },
                 },

@@ -129,6 +129,54 @@ def test_manifest_model_and_schema_reject_invalid_dns_label() -> None:
         Draft202012Validator(schema, format_checker=FormatChecker()).validate(document)
 
 
+def manifest_document(url: str) -> dict[str, Any]:
+    document = json.loads(json.dumps(VALID_DOCUMENTS["collection-manifest"]))
+    document["videos"][0]["url"] = url
+    return document
+
+
+def model_accepts_manifest(document: dict[str, Any]) -> bool:
+    try:
+        CollectionManifest.model_validate(document)
+    except ValidationError:
+        return False
+    return True
+
+
+def schema_accepts_manifest(document: dict[str, Any]) -> bool:
+    schema = export_schema("collection-manifest")
+    try:
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(document)
+    except JsonSchemaValidationError:
+        return False
+    return True
+
+
+@pytest.mark.parametrize(
+    ("url", "accepted"),
+    [
+        ("https://foo_bar.bilibili.com/video/BV1", False),
+        ("https://-foo.bilibili.com/video/BV1", False),
+        ("https://foo-.bilibili.com/video/BV1", False),
+        ("https://foo..bilibili.com/video/BV1", False),
+        ("https://%62ilibili.com/video/BV1", False),
+        ("https://bilibili.com:65536/video/BV1", False),
+        ("https://bilibili.com:443/video/BV1", True),
+        ("https://bilibili.com:65535/video/BV1", True),
+    ],
+)
+def test_manifest_model_and_schema_agree_on_dns_labels_and_ports(url: str, accepted: bool) -> None:
+    document = manifest_document(url)
+    assert model_accepts_manifest(document) is accepted
+    assert schema_accepts_manifest(document) is accepted
+
+
+def test_manifest_model_and_schema_agree_on_leading_zero_port() -> None:
+    document = manifest_document("https://bilibili.com:00080/video/BV1")
+    assert model_accepts_manifest(document) is True
+    assert schema_accepts_manifest(document) is True
+
+
 @pytest.mark.parametrize(
     ("platform", "url"),
     [
@@ -138,9 +186,7 @@ def test_manifest_model_and_schema_reject_invalid_dns_label() -> None:
         ("douyin", "https://www.bilibili.com/video/BV1test"),
     ],
 )
-def test_manifest_schema_rejects_non_public_or_cross_platform_urls(
-    platform: str, url: str
-) -> None:
+def test_manifest_schema_rejects_non_public_or_cross_platform_urls(platform: str, url: str) -> None:
     schema = json.loads(
         (ROOT / "schemas" / "collection-manifest.schema.json").read_text(encoding="utf-8")
     )
