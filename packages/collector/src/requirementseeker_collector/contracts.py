@@ -13,6 +13,7 @@ from pydantic import (
     ConfigDict,
     Field,
     HttpUrl,
+    StrictBool,
     model_validator,
 )
 
@@ -33,7 +34,7 @@ PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 
 
 class Contract(BaseModel):
-    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+    model_config = ConfigDict(extra="forbid")
 
 
 def _timestamp(value: object) -> object:
@@ -57,7 +58,13 @@ Timestamp = Annotated[AwareDatetime, BeforeValidator(_timestamp), AfterValidator
 
 
 def _https_url(value: object) -> object:
-    if not isinstance(value, str) or urlsplit(value).scheme.lower() != "https":
+    if isinstance(value, HttpUrl):
+        scheme = value.scheme
+    elif isinstance(value, str):
+        scheme = urlsplit(value).scheme
+    else:
+        scheme = ""
+    if scheme.lower() != "https":
         raise ValueError("url_must_use_https")
     return value
 
@@ -72,6 +79,7 @@ PublicHttpUrl = Annotated[
     HttpUrl,
     BeforeValidator(_https_url),
     AfterValidator(_url_without_credentials),
+    Field(json_schema_extra={"pattern": r"^https://(?![^/?#]*@)"}),
 ]
 
 
@@ -101,7 +109,7 @@ class RawComment(Contract):
     collected_at: Timestamp
     like_count: NonNegativeInt | None
     reply_count: NonNegativeInt | None
-    is_video_author: bool | None
+    is_video_author: StrictBool | None
     source_stratum: Stratum
     source_page_or_rank: PositiveInt
 
@@ -141,6 +149,45 @@ _PLATFORM_HOSTS: dict[Platform, tuple[str, ...]] = {
 
 
 class ManifestVideo(Contract):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"platform": {"const": "bilibili"}},
+                        "required": ["platform"],
+                    },
+                    "then": {
+                        "properties": {
+                            "url": {
+                                "pattern": (
+                                    r"^https://(?:[^@/?#]+\.)*"
+                                    r"(?:bilibili\.com|b23\.tv)(?::\d+)?(?:[/?#]|$)"
+                                )
+                            }
+                        }
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {"platform": {"const": "douyin"}},
+                        "required": ["platform"],
+                    },
+                    "then": {
+                        "properties": {
+                            "url": {
+                                "pattern": (
+                                    r"^https://(?:[^@/?#]+\.)*"
+                                    r"(?:douyin\.com|iesdouyin\.com)(?::\d+)?(?:[/?#]|$)"
+                                )
+                            }
+                        }
+                    },
+                },
+            ]
+        }
+    )
+
     platform: Platform
     video_key: Identifier
     url: PublicHttpUrl

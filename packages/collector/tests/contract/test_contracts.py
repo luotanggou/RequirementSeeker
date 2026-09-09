@@ -8,6 +8,7 @@ from requirementseeker_collector.contracts import (
     CollectionError,
     CollectionManifest,
     CollectionRecord,
+    Contract,
     ManifestVideo,
     RawComment,
     RawVideo,
@@ -103,6 +104,10 @@ def manifest_data(**overrides: Any) -> dict[str, Any]:
     return data
 
 
+def test_contract_does_not_validate_assignment() -> None:
+    assert Contract.model_config.get("validate_assignment") is not True
+
+
 def test_video_rejects_unknown_fields() -> None:
     data = video_data()
     data["cookie"] = "secret"
@@ -160,6 +165,12 @@ def test_non_negative_integers_are_strict(
 def test_source_rank_is_a_strict_positive_integer(value: object) -> None:
     with pytest.raises(ValidationError):
         RawComment.model_validate(comment_data(source_page_or_rank=value))
+
+
+@pytest.mark.parametrize("value", [0, 1, "false", "true"])
+def test_is_video_author_is_a_strict_nullable_boolean(value: object) -> None:
+    with pytest.raises(ValidationError):
+        RawComment.model_validate(comment_data(is_video_author=value))
 
 
 @pytest.mark.parametrize(
@@ -222,6 +233,11 @@ def test_manifest_urls_reject_credentials() -> None:
         ManifestVideo.model_validate(
             manifest_video_data(url="https://user:secret@www.bilibili.com/video/BV1test")
         )
+
+
+def test_manifest_video_python_dump_can_be_revalidated() -> None:
+    video = ManifestVideo.model_validate(manifest_video_data())
+    assert ManifestVideo.model_validate(video.model_dump()) == video
 
 
 @pytest.mark.parametrize(

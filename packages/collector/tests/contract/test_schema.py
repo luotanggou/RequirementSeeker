@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from pydantic import BaseModel
 
 from requirementseeker_collector import (
@@ -79,6 +80,11 @@ VALID_DOCUMENTS: dict[str, dict[str, Any]] = {
 }
 
 
+def test_package_declares_typing_support() -> None:
+    marker = ROOT / "src" / "requirementseeker_collector" / "py.typed"
+    assert marker.is_file()
+
+
 @pytest.mark.parametrize("kind", SCHEMA_MODELS)
 def test_committed_schema_matches_generated_schema(kind: str) -> None:
     path = ROOT / "schemas" / f"{kind}.schema.json"
@@ -93,3 +99,25 @@ def test_committed_schema_matches_generated_schema(kind: str) -> None:
 def test_valid_documents_pass_standard_json_schema(kind: str) -> None:
     schema = json.loads((ROOT / "schemas" / f"{kind}.schema.json").read_text(encoding="utf-8"))
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(VALID_DOCUMENTS[kind])
+
+
+@pytest.mark.parametrize(
+    ("platform", "url"),
+    [
+        ("bilibili", "http://www.bilibili.com/video/BV1test"),
+        ("bilibili", "https://user:secret@www.bilibili.com/video/BV1test"),
+        ("bilibili", "https://www.douyin.com/video/1"),
+        ("douyin", "https://www.bilibili.com/video/BV1test"),
+    ],
+)
+def test_manifest_schema_rejects_non_public_or_cross_platform_urls(
+    platform: str, url: str
+) -> None:
+    schema = json.loads(
+        (ROOT / "schemas" / "collection-manifest.schema.json").read_text(encoding="utf-8")
+    )
+    document = json.loads(json.dumps(VALID_DOCUMENTS["collection-manifest"]))
+    document["videos"][0]["platform"] = platform
+    document["videos"][0]["url"] = url
+    with pytest.raises(JsonSchemaValidationError):
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(document)

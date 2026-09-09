@@ -2,6 +2,46 @@
   "$defs": {
     "ManifestVideo": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "platform": {
+                "const": "bilibili"
+              }
+            },
+            "required": [
+              "platform"
+            ]
+          },
+          "then": {
+            "properties": {
+              "url": {
+                "pattern": "^https://(?:[^@/?#]+\\.)*(?:bilibili\\.com|b23\\.tv)(?::\\d+)?(?:[/?#]|$)"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "platform": {
+                "const": "douyin"
+              }
+            },
+            "required": [
+              "platform"
+            ]
+          },
+          "then": {
+            "properties": {
+              "url": {
+                "pattern": "^https://(?:[^@/?#]+\\.)*(?:douyin\\.com|iesdouyin\\.com)(?::\\d+)?(?:[/?#]|$)"
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "platform": {
           "enum": [
@@ -22,6 +62,7 @@
           "format": "uri",
           "maxLength": 2083,
           "minLength": 1,
+          "pattern": "^https://(?![^/?#]*@)",
           "title": "Url",
           "type": "string"
         },
