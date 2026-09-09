@@ -11,13 +11,15 @@ from requirementseeker_collector.planning import (
 )
 
 
-def comment(raw_comment_id: str, source_stratum: Stratum, rank: int) -> RawComment:
+def comment(
+    raw_comment_id: str, source_stratum: Stratum, rank: int, *, text: str | None = None
+) -> RawComment:
     return RawComment.model_validate(
         {
             "raw_comment_id": raw_comment_id,
             "raw_author_id": None,
             "raw_parent_comment_id": None,
-            "text": f"comment {raw_comment_id}",
+            "text": text if text is not None else f"comment {raw_comment_id}",
             "published_at": None,
             "collected_at": "2026-09-09T01:00:00Z",
             "like_count": None,
@@ -37,7 +39,16 @@ def identities(comments: Sequence[RawComment]) -> list[tuple[str, Stratum, int]]
 
 @pytest.mark.parametrize(
     ("total", "expected"),
-    [(0, 0), (200, 200), (201, 200), (2000, 500), (2001, 500), (10000, 1000)],
+    [
+        (0, 0),
+        (200, 200),
+        (201, 200),
+        (804, 201),
+        (2000, 500),
+        (2001, 500),
+        (3600, 600),
+        (10000, 1000),
+    ],
 )
 def test_collection_target_boundaries(total: int, expected: int) -> None:
     assert collection_target(total).target == expected
@@ -161,3 +172,17 @@ def test_input_order_does_not_change_selection() -> None:
     backward = identities(select_comments(list(reversed(candidates)), 5))
 
     assert forward == backward
+
+
+def test_equal_primary_keys_use_a_canonical_payload_tie_break() -> None:
+    first = comment("duplicate", "top", 1, text="first payload")
+    second = comment("duplicate", "top", 1, text="second payload")
+
+    forward = select_comments([first, second], 1)
+    backward = select_comments([second, first], 1)
+
+    assert [item.model_dump_json() for item in forward] == [
+        item.model_dump_json() for item in backward
+    ]
+    assert any(forward[0] is candidate for candidate in (first, second))
+    assert any(backward[0] is candidate for candidate in (first, second))

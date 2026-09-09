@@ -49,7 +49,13 @@ def select_comments(candidates: Sequence[RawComment], target: int) -> list[RawCo
     for candidate in candidates:
         pools[candidate.source_stratum].append(candidate)
     for pool in pools.values():
-        pool.sort(key=lambda candidate: (candidate.source_page_or_rank, candidate.raw_comment_id))
+        pool.sort(
+            key=lambda candidate: (
+                candidate.source_page_or_rank,
+                candidate.raw_comment_id,
+                candidate.model_dump_json(),
+            )
+        )
 
     positions: dict[Stratum, int] = {name: 0 for name in WEIGHTS}
     selected: list[RawComment] = []
