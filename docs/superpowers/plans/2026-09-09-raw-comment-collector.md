@@ -38,7 +38,7 @@
 - Create: `packages/collector/tests/contract/test_contracts.py`
 - Create: `packages/collector/tests/contract/test_schema.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_video_rejects_unknown_fields() -> None:
@@ -62,13 +62,13 @@ def test_collection_rejects_inverted_times() -> None:
         ))
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/contract/test_contracts.py -q`
 
 Expected: collection fails because `requirementseeker_collector.contracts` does not exist.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create a Hatchling project matching `packages/agent`, with dependencies `pydantic>=2.12,<3` and `playwright>=1.55,<2`, and dev dependencies `pytest`, `jsonschema`, `ruff`, and `mypy`. Define `Contract` with `extra="forbid"`, strict non-negative integers, RFC 3339 timezone validation, and these public models:
 
@@ -163,13 +163,13 @@ class CollectionManifest(Contract):
 
 `PublicHttpUrl` accepts HTTPS only, rejects username/password, and validates Bilibili/Douyin host consistency in `ManifestVideo`. Export schemas with `model_json_schema()` and check in `video.schema.json`, `comment.schema.json`, `collection.schema.json`, and `collection-manifest.schema.json`.
 
-- [ ] **Step 4: Run tests and static checks**
+- [x] **Step 4: Run tests and static checks**
 
 Run: `uv sync --project packages/collector && uv run --project packages/collector pytest packages/collector/tests/contract -q && uv run --project packages/collector ruff check packages/collector && uv run --project packages/collector mypy packages/collector/src`
 
 Expected: contract tests pass; Ruff and mypy report no errors.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector
