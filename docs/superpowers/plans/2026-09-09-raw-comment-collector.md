@@ -182,7 +182,7 @@ git commit -m "feat(collector): add strict raw data contracts"
 - Create: `packages/collector/src/requirementseeker_collector/planning.py`
 - Create: `packages/collector/tests/test_planning.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 @pytest.mark.parametrize(("total", "expected"), [(0, 0), (200, 200), (201, 200), (2000, 500), (2001, 500), (10000, 1000)])
@@ -198,13 +198,13 @@ def test_quota_rounding_is_deterministic() -> None:
     assert allocate_quotas(7) == {"top": 3, "recent": 2, "replies": 1, "long_tail": 1}
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/test_planning.py -q`
 
 Expected: import fails because `planning.py` is absent.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```python
 WEIGHTS = {"top": 35, "recent": 25, "replies": 20, "long_tail": 20}
@@ -239,13 +239,13 @@ def allocate_quotas(target: int) -> dict[Stratum, int]:
 
 Add `select_comments(candidates, target)` that visits strata in `top,recent,replies,long_tail` order, sorts each by `source_page_or_rank` then ID, keeps one ID, and fills shortages in `FILL_ORDER` without relabeling the first accepted stratum.
 
-- [ ] **Step 4: Run tests and static checks**
+- [x] **Step 4: Run tests and static checks**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/test_planning.py -q && uv run --project packages/collector ruff check packages/collector/src packages/collector/tests && uv run --project packages/collector mypy packages/collector/src`
 
 Expected: planning tests pass; quality checks pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector/src/requirementseeker_collector/planning.py packages/collector/tests/test_planning.py
