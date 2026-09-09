@@ -1,0 +1,128 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "raw_comment_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^\\S+$",
+      "title": "Raw Comment Id",
+      "type": "string"
+    },
+    "raw_author_id": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Raw Author Id"
+    },
+    "raw_parent_comment_id": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Raw Parent Comment Id"
+    },
+    "text": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Text",
+      "type": "string"
+    },
+    "published_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Published At"
+    },
+    "collected_at": {
+      "format": "date-time",
+      "title": "Collected At",
+      "type": "string"
+    },
+    "like_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Like Count"
+    },
+    "reply_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Reply Count"
+    },
+    "is_video_author": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Is Video Author"
+    },
+    "source_stratum": {
+      "enum": [
+        "top",
+        "recent",
+        "replies",
+        "long_tail"
+      ],
+      "title": "Source Stratum",
+      "type": "string"
+    },
+    "source_page_or_rank": {
+      "exclusiveMinimum": 0,
+      "title": "Source Page Or Rank",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "raw_comment_id",
+    "raw_author_id",
+    "raw_parent_comment_id",
+    "text",
+    "published_at",
+    "collected_at",
+    "like_count",
+    "reply_count",
+    "is_video_author",
+    "source_stratum",
+    "source_page_or_rank"
+  ],
+  "title": "RawComment",
+  "type": "object"
+}

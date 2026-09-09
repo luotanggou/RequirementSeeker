@@ -1,0 +1,154 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "platform": {
+      "enum": [
+        "bilibili",
+        "douyin"
+      ],
+      "title": "Platform",
+      "type": "string"
+    },
+    "raw_video_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^\\S+$",
+      "title": "Raw Video Id",
+      "type": "string"
+    },
+    "raw_author_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "pattern": "^\\S+$",
+      "title": "Raw Author Id",
+      "type": "string"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "published_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Published At"
+    },
+    "duration_seconds": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Duration Seconds"
+    },
+    "total_comment_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Total Comment Count"
+    },
+    "view_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "View Count"
+    },
+    "like_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Like Count"
+    },
+    "favorite_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Favorite Count"
+    },
+    "share_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Share Count"
+    },
+    "author_follower_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Author Follower Count"
+    },
+    "captured_at": {
+      "format": "date-time",
+      "title": "Captured At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "platform",
+    "raw_video_id",
+    "raw_author_id",
+    "title",
+    "description",
+    "published_at",
+    "duration_seconds",
+    "total_comment_count",
+    "view_count",
+    "like_count",
+    "favorite_count",
+    "share_count",
+    "author_follower_count",
+    "captured_at"
+  ],
+  "title": "RawVideo",
+  "type": "object"
+}

@@ -1,0 +1,137 @@
+{
+  "$defs": {
+    "CollectionError": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "title": "Category",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "stage": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "title": "Stage",
+          "type": "string"
+        },
+        "description": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "raw_comment_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Comment Id"
+        },
+        "conflict_fields": {
+          "items": {
+            "enum": [
+              "raw_author_id",
+              "text"
+            ],
+            "type": "string"
+          },
+          "title": "Conflict Fields",
+          "type": "array"
+        }
+      },
+      "required": [
+        "category",
+        "occurred_at",
+        "stage",
+        "description"
+      ],
+      "title": "CollectionError",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "reported_total": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Reported Total"
+    },
+    "collected_total": {
+      "minimum": 0,
+      "title": "Collected Total",
+      "type": "integer"
+    },
+    "pages_requested": {
+      "minimum": 0,
+      "title": "Pages Requested",
+      "type": "integer"
+    },
+    "pages_succeeded": {
+      "minimum": 0,
+      "title": "Pages Succeeded",
+      "type": "integer"
+    },
+    "sort_modes": {
+      "items": {
+        "maxLength": 256,
+        "minLength": 1,
+        "pattern": "^\\S+$",
+        "type": "string"
+      },
+      "title": "Sort Modes",
+      "type": "array"
+    },
+    "collection_started_at": {
+      "format": "date-time",
+      "title": "Collection Started At",
+      "type": "string"
+    },
+    "collection_finished_at": {
+      "format": "date-time",
+      "title": "Collection Finished At",
+      "type": "string"
+    },
+    "collection_errors": {
+      "items": {
+        "$ref": "#/$defs/CollectionError"
+      },
+      "title": "Collection Errors",
+      "type": "array"
+    }
+  },
+  "required": [
+    "reported_total",
+    "collected_total",
+    "pages_requested",
+    "pages_succeeded",
+    "sort_modes",
+    "collection_started_at",
+    "collection_finished_at",
+    "collection_errors"
+  ],
+  "title": "CollectionRecord",
+  "type": "object"
+}

@@ -1,0 +1,93 @@
+{
+  "$defs": {
+    "ManifestVideo": {
+      "additionalProperties": false,
+      "properties": {
+        "platform": {
+          "enum": [
+            "bilibili",
+            "douyin"
+          ],
+          "title": "Platform",
+          "type": "string"
+        },
+        "video_key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^\\S+$",
+          "title": "Video Key",
+          "type": "string"
+        },
+        "url": {
+          "format": "uri",
+          "maxLength": 2083,
+          "minLength": 1,
+          "title": "Url",
+          "type": "string"
+        },
+        "direction": {
+          "enum": [
+            "software_tools",
+            "tutorial_workflow",
+            "life_services",
+            "entertainment_culture",
+            "ecommerce_marketing"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "comment_scale": {
+          "enum": [
+            "up_to_200",
+            "201_to_2000",
+            "over_2000"
+          ],
+          "title": "Comment Scale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "platform",
+        "video_key",
+        "url",
+        "direction",
+        "comment_scale"
+      ],
+      "title": "ManifestVideo",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "manifest_version": {
+      "const": "1.0",
+      "title": "Manifest Version",
+      "type": "string"
+    },
+    "videos": {
+      "items": {
+        "$ref": "#/$defs/ManifestVideo"
+      },
+      "title": "Videos",
+      "type": "array"
+    },
+    "unavailable_platforms": {
+      "items": {
+        "enum": [
+          "bilibili",
+          "douyin"
+        ],
+        "type": "string"
+      },
+      "title": "Unavailable Platforms",
+      "type": "array"
+    }
+  },
+  "required": [
+    "manifest_version",
+    "videos",
+    "unavailable_platforms"
+  ],
+  "title": "CollectionManifest",
+  "type": "object"
+}
