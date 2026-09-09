@@ -26,6 +26,8 @@ def collection_target(total: int | None) -> TargetDecision:
         return TargetDecision(total, True, None)
     if total <= 2000:
         return TargetDecision(min(500, max(200, ceil(total * 0.25))), True, None)
+    if total >= 10000:
+        return TargetDecision(1000, True, None)
     return TargetDecision(min(1000, max(500, ceil(10 * sqrt(total)))), True, None)
 
 

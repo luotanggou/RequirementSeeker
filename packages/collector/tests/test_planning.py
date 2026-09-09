@@ -58,6 +58,10 @@ def test_unknown_total_uses_audited_pilot_cap() -> None:
     assert collection_target(None) == TargetDecision(200, False, "reported_total_unavailable")
 
 
+def test_huge_total_uses_the_fixed_upper_cap_without_float_conversion() -> None:
+    assert collection_target(10**400) == TargetDecision(1000, True, None)
+
+
 def test_negative_total_is_rejected_clearly() -> None:
     with pytest.raises(ValueError, match="total_must_be_non_negative"):
         collection_target(-1)
