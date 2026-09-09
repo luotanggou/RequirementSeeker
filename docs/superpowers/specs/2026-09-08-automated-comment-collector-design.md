@@ -1,7 +1,7 @@
 # 自动化评论数据准备设计
 
 - 日期：2026-09-08。
-- 状态：对话设计已批准，等待书面规格复核。
+- 状态：对话设计与书面规格均已批准。
 - 目标分支：`codex/data-collector`。
 - 依据：`.local-data/m2-collector-task.md`、Agent M2 模型网关、需求信号与聚类设计、`docs/PRD.md`。
 
@@ -67,7 +67,7 @@ rs-collect batch <manifest.json>
 数据工具提供独立的 `rs-dataset` 命令：
 
 ```text
-rs-dataset sanitize --raw <raw-root> --output <sanitized-root> --secret-env <name>
+rs-dataset sanitize --raw <raw-root> --plan <manifest.json> --output <sanitized-root> --secret-env <name>
 rs-dataset export-labels --sanitized <sanitized-root> --output <label-root>
 rs-dataset validate-labels <label-root>
 ```
@@ -176,7 +176,7 @@ total > 2000       -> target = min(1000, max(500, ceil(10 * sqrt(total))))
 
 正文以确定性规则替换手机号、邮箱、精确地址、私聊账号和其他直接身份信息，替换为带类型但不含原值的标记。规则不翻译、不总结、不改写需求语义；无法确定是否属于身份信息时列入人工复核清单，不擅自删除整条评论。标准化只统一 Unicode 形式、换行和外层空白。
 
-每个脱敏视频保留与原始文件一一对应的 `video.json`、`comments.jsonl`、`collection.json`，另写不含原始 ID 的 `sanitization.json`，记录规则版本、输入摘要、输出摘要、替换类别计数、复核项数量和起止时间。原始到伪 ID 的映射不落盘。
+每个脱敏视频保留与原始文件一一对应的 `video.json`、`comments.jsonl`、`collection.json`，另写不含原始 ID 的 `sanitization.json` 和 `sampling-manifest.json`。前者记录规则版本、输入摘要、输出摘要、替换类别计数、复核项数量和起止时间；后者严格按 M2 `SamplingManifest 1.0` 提供脱敏平台/视频 ID、方向、目标和去重前实收数量、页面完整性、可用分层、作者完整性、确定性重复计数、视频指标及分层评论 ID。批量清单的 `software_tools`、`life_services` 分别转换为 M2 的 `software_tool`、`life_service`，其余方向名称不变。没有评论或没有成功页面的视频不生成 SamplingManifest，进入替换候选清单。方向只从用户批准的批量清单读取；原始到伪 ID 的映射不落盘。
 
 数据按伪视频 ID 的稳定哈希分配到开发 40%、校准 30%、留出 30%。分配以视频为单位；评论和回复永不跨集合。比例按 24 个视频的确定性目标数量分配为 10、7、7，同一输入和秘密重跑结果一致。
 
