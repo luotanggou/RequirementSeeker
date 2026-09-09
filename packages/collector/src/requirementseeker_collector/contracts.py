@@ -186,7 +186,7 @@ def _platform_url_pattern(hosts: tuple[str, ...]) -> str:
     roots = "|".join(_ascii_case_insensitive_literal(host) for host in hosts)
     return (
         rf"^{scheme}://(?:{_DNS_LABEL_PATTERN}\.)*"
-        rf"(?:{roots})(?::{_PORT_PATTERN})?(?:[/?#][^\x00-\x20\x7f]*)?$"
+        rf"(?:{roots})(?::{_PORT_PATTERN})?(?:[/?#][^\x00-\x20\x7f]*)?(?![\s\S])"
     )
 
 

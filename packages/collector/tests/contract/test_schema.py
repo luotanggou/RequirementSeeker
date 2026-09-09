@@ -186,6 +186,7 @@ def test_manifest_model_and_schema_agree_on_leading_zero_port() -> None:
         ("https:\n//bilibili.com/v", False),
         ("https://bilibili.com/v ", False),
         ("https://bilibili.com/v\t", False),
+        ("https://bilibili.com/v\n", False),
         ("https://bilibili.com/path with space", False),
         ("https://bilibili.com/v\x7f", False),
         ("https://bilibili.com/path%20with%20space", True),
