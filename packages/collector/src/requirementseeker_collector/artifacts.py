@@ -1,7 +1,6 @@
 """Validated artifact writing and recoverable directory commits."""
 
 import json
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,12 +27,18 @@ class CommitPaths:
     backup: Path
 
     def __post_init__(self) -> None:
-        normalized = {
-            os.path.normcase(os.path.abspath(path))
-            for path in (self.staging, self.target, self.backup)
-        }
-        if len(normalized) != 3:
-            raise ArtifactValidationError("commit_paths_not_distinct")
+        try:
+            resolved = tuple(
+                path.resolve(strict=False) for path in (self.staging, self.target, self.backup)
+            )
+        except (OSError, RuntimeError):
+            raise ArtifactValidationError("commit_paths_unresolvable") from None
+        for index, left in enumerate(resolved):
+            for right in resolved[index + 1 :]:
+                if left == right:
+                    raise ArtifactValidationError("commit_paths_not_distinct")
+                if left in right.parents or right in left.parents:
+                    raise ArtifactValidationError("commit_paths_not_disjoint")
 
 
 def write_generation(
@@ -136,8 +141,11 @@ def commit_generation(paths: CommitPaths) -> None:
     validate_generation(paths.staging)
     if paths.backup.exists():
         raise ArtifactCommitError("backup_exists")
-    paths.target.parent.mkdir(parents=True, exist_ok=True)
-    paths.backup.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        paths.target.parent.mkdir(parents=True, exist_ok=True)
+        paths.backup.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise ArtifactCommitError("parent_creation_failed") from None
 
     had_target = paths.target.exists()
     if had_target:
@@ -161,8 +169,8 @@ def recover_interrupted_commit(paths: CommitPaths) -> bool:
 
     if not paths.backup.exists() or paths.target.exists():
         return False
-    paths.target.parent.mkdir(parents=True, exist_ok=True)
     try:
+        paths.target.parent.mkdir(parents=True, exist_ok=True)
         _move_directory(paths.backup, paths.target)
     except OSError:
         raise ArtifactCommitError("backup_recovery_failed") from None

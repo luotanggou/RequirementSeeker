@@ -88,9 +88,49 @@ def write_valid(directory: Path, title: str = "测试视频") -> None:
     write_generation(directory, video, comments, collection)
 
 
-def test_commit_paths_must_be_distinct(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [("staging", "target"), ("staging", "backup"), ("target", "backup")],
+)
+def test_commit_paths_must_be_distinct(tmp_path: Path, left: str, right: str) -> None:
+    values = {
+        "staging": tmp_path / "staging",
+        "target": tmp_path / "target",
+        "backup": tmp_path / "backup",
+    }
+    values[right] = values[left]
+
     with pytest.raises(ArtifactValidationError, match="commit_paths_not_distinct"):
-        CommitPaths(tmp_path / "same", tmp_path / "same", tmp_path / "backup")
+        CommitPaths(values["staging"], values["target"], values["backup"])
+
+    assert not any(path.exists() for path in values.values())
+
+
+@pytest.mark.parametrize(
+    ("ancestor", "descendant"),
+    [
+        ("staging", "target"),
+        ("target", "staging"),
+        ("staging", "backup"),
+        ("backup", "staging"),
+        ("target", "backup"),
+        ("backup", "target"),
+    ],
+)
+def test_commit_paths_must_not_overlap(tmp_path: Path, ancestor: str, descendant: str) -> None:
+    values = {
+        "staging": tmp_path / "staging",
+        "target": tmp_path / "target",
+        "backup": tmp_path / "backup",
+    }
+    values[descendant] = values[ancestor] / "nested"
+
+    with pytest.raises(ArtifactValidationError, match="commit_paths_not_disjoint") as caught:
+        CommitPaths(values["staging"], values["target"], values["backup"])
+
+    assert "nested" not in str(caught.value)
+    assert str(tmp_path) not in repr(caught.value)
+    assert not any(path.exists() for path in values.values())
 
 
 def test_writer_creates_complete_round_trippable_generation(tmp_path: Path) -> None:
@@ -224,6 +264,42 @@ def test_existing_backup_is_rejected_without_changes(tmp_path: Path) -> None:
     assert (
         RawVideo.model_validate_json((paths.target / "video.json").read_bytes()).title == "旧结果"
     )
+
+
+@pytest.mark.parametrize("blocked_parent", ["target", "backup"])
+def test_commit_converts_parent_creation_errors_without_leaking_paths(
+    tmp_path: Path, blocked_parent: str
+) -> None:
+    blocker = tmp_path / "secret-marker"
+    blocker.write_text("ordinary file", encoding="utf-8")
+    target = blocker / "nested" / "target" if blocked_parent == "target" else tmp_path / "target"
+    backup = blocker / "nested" / "backup" if blocked_parent == "backup" else tmp_path / "backup"
+    paths = CommitPaths(tmp_path / "staging", target, backup)
+    write_valid(paths.staging)
+
+    with pytest.raises(ArtifactCommitError) as caught:
+        commit_generation(paths)
+
+    message_forms = (str(caught.value), repr(caught.value), repr(caught.value.args))
+    assert all("secret-marker" not in message for message in message_forms)
+    assert all(str(tmp_path) not in message for message in message_forms)
+    assert not paths.target.exists()
+
+
+def test_recovery_converts_parent_creation_errors_without_leaking_paths(tmp_path: Path) -> None:
+    blocker = tmp_path / "secret-marker"
+    blocker.write_text("ordinary file", encoding="utf-8")
+    paths = CommitPaths(tmp_path / "staging", blocker / "nested" / "target", tmp_path / "backup")
+    write_valid(paths.backup)
+
+    with pytest.raises(ArtifactCommitError) as caught:
+        recover_interrupted_commit(paths)
+
+    message_forms = (str(caught.value), repr(caught.value), repr(caught.value.args))
+    assert all("secret-marker" not in message for message in message_forms)
+    assert all(str(tmp_path) not in message for message in message_forms)
+    assert paths.backup.exists()
+    assert not paths.target.exists()
 
 
 @pytest.mark.parametrize("has_old_target", [False, True])
