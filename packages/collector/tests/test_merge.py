@@ -123,6 +123,26 @@ def test_current_metadata_variants_keep_first_without_duplicate_count() -> None:
     assert merged.comments[0] is first
 
 
+def test_repeated_metadata_variant_counts_as_exact_duplicate() -> None:
+    first = comment("c1", like_count=1)
+    variant = comment("c1", like_count=9)
+
+    result = merge_current_run([first, variant, variant.model_copy()])
+
+    assert list(result) == [first]
+    assert result.exact_duplicate_count == 1
+
+
+def test_each_repeated_metadata_version_counts_as_exact_duplicate() -> None:
+    first = comment("c1", like_count=1)
+    variant = comment("c1", like_count=9)
+
+    result = merge_current_run([first, variant, first.model_copy(), variant.model_copy()])
+
+    assert list(result) == [first]
+    assert result.exact_duplicate_count == 2
+
+
 def test_conflict_inside_one_run_rejects_generation() -> None:
     with pytest.raises(CurrentRunConflict, match="c1"):
         merge_current_run([comment("c1"), comment("c1", text="changed")])

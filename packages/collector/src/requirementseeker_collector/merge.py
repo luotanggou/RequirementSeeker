@@ -50,16 +50,21 @@ def conflict_fields(old: RawComment, new: RawComment) -> list[ConflictField]:
 
 def merge_current_run(current: Sequence[RawComment]) -> CurrentRunResult:
     unique: dict[str, RawComment] = {}
+    seen_payloads: dict[str, set[str]] = {}
     exact_duplicate_count = 0
 
     for item in current:
         first = unique.get(item.raw_comment_id)
+        payload = item.model_dump_json()
         if first is None:
             unique[item.raw_comment_id] = item
-        elif first == item:
-            exact_duplicate_count += 1
+            seen_payloads[item.raw_comment_id] = {payload}
         elif conflict_fields(first, item):
             raise CurrentRunConflict(f"current_run_identity_conflict: {item.raw_comment_id}")
+        elif payload in seen_payloads[item.raw_comment_id]:
+            exact_duplicate_count += 1
+        else:
+            seen_payloads[item.raw_comment_id].add(payload)
 
     return CurrentRunResult(list(unique.values()), exact_duplicate_count)
 
