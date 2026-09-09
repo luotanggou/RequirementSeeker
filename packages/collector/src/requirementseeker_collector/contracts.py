@@ -65,26 +65,22 @@ _PORT_PATTERN = (
 
 
 def _https_url(value: object) -> object:
-    if isinstance(value, HttpUrl):
-        scheme = value.scheme
-    elif isinstance(value, str):
-        try:
-            parsed = urlsplit(value)
-            host = parsed.hostname
-        except ValueError:
-            raise ValueError("url_must_be_valid") from None
-        scheme = parsed.scheme
-        if host is None or re.fullmatch(_DNS_HOST_PATTERN, host) is None:
-            raise ValueError("url_host_must_use_ascii_dns_labels")
-        host_and_port = parsed.netloc.rsplit("@", 1)[-1]
-        if ":" in host_and_port:
-            raw_port = host_and_port.rsplit(":", 1)[-1]
-            if re.fullmatch(_PORT_PATTERN, raw_port) is None:
-                raise ValueError("url_port_must_be_between_0_and_65535")
-    else:
-        scheme = ""
-    if scheme.lower() != "https":
+    if not isinstance(value, (str, HttpUrl)):
+        raise ValueError("url_must_be_valid")
+    try:
+        parsed = urlsplit(str(value))
+        host = parsed.hostname
+    except ValueError:
+        raise ValueError("url_must_be_valid") from None
+    if parsed.scheme.lower() != "https":
         raise ValueError("url_must_use_https")
+    if host is None or re.fullmatch(_DNS_HOST_PATTERN, host) is None:
+        raise ValueError("url_host_must_use_ascii_dns_labels")
+    host_and_port = parsed.netloc.rsplit("@", 1)[-1]
+    if ":" in host_and_port:
+        raw_port = host_and_port.rsplit(":", 1)[-1]
+        if re.fullmatch(_PORT_PATTERN, raw_port) is None:
+            raise ValueError("url_port_must_be_between_0_and_65535")
     return value
 
 

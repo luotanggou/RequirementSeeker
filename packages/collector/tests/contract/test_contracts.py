@@ -2,7 +2,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, HttpUrl, ValidationError
 
 from requirementseeker_collector.contracts import (
     CollectionError,
@@ -238,6 +238,19 @@ def test_manifest_urls_reject_credentials() -> None:
 def test_manifest_video_python_dump_can_be_revalidated() -> None:
     video = ManifestVideo.model_validate(manifest_video_data())
     assert ManifestVideo.model_validate(video.model_dump()) == video
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://foo_bar.bilibili.com/video/BV1",
+        "https://-foo.bilibili.com/video/BV1",
+        "https://foo-.bilibili.com/video/BV1",
+    ],
+)
+def test_manifest_rejects_preparsed_urls_with_invalid_dns_labels(url: str) -> None:
+    with pytest.raises(ValidationError):
+        ManifestVideo.model_validate(manifest_video_data(url=HttpUrl(url)))
 
 
 @pytest.mark.parametrize(
