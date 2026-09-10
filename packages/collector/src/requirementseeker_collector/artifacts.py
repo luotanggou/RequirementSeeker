@@ -18,21 +18,28 @@ class ArtifactCommitError(RuntimeError):
     """Raised when an artifact directory cannot be safely committed."""
 
 
+_ARTIFACT_NAMES = frozenset({"video.json", "comments.jsonl", "collection.json"})
+
+
+def _resolve_paths(paths: tuple[Path, ...]) -> tuple[Path, ...] | None:
+    try:
+        return tuple(path.resolve(strict=False) for path in paths)
+    except (OSError, RuntimeError):
+        return None
+
+
 @dataclass(frozen=True)
 class CommitPaths:
-    """The three distinct directories participating in a commit."""
+    """The three disjoint directories participating in a commit."""
 
     staging: Path
     target: Path
     backup: Path
 
     def __post_init__(self) -> None:
-        try:
-            resolved = tuple(
-                path.resolve(strict=False) for path in (self.staging, self.target, self.backup)
-            )
-        except (OSError, RuntimeError):
-            raise ArtifactValidationError("commit_paths_unresolvable") from None
+        resolved = _resolve_paths((self.staging, self.target, self.backup))
+        if resolved is None:
+            raise ArtifactValidationError("commit_paths_unresolvable")
         for index, left in enumerate(resolved):
             for right in resolved[index + 1 :]:
                 if left == right:
@@ -41,81 +48,179 @@ class CommitPaths:
                     raise ArtifactValidationError("commit_paths_not_disjoint")
 
 
+def _make_directory(path: Path) -> bool:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return True
+
+
+def _write_text(path: Path, content: str) -> bool:
+    try:
+        path.write_text(content, encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def _discard_partial_generation(directory: Path) -> None:
+    for name in _ARTIFACT_NAMES:
+        try:
+            (directory / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+
+
 def write_generation(
     staging: Path,
     video: RawVideo,
     comments: Sequence[RawComment],
     collection: CollectionRecord,
 ) -> None:
-    """Write a complete generation beneath the staging directory."""
+    """Build and validate a generation before publishing it as staging."""
 
-    video_json = video.model_dump_json()
-    comments_jsonl = "".join(f"{comment.model_dump_json()}\n" for comment in comments)
-    collection_json = collection.model_dump_json()
-    staging.mkdir(parents=True, exist_ok=True)
-    (staging / "video.json").write_text(video_json, encoding="utf-8")
-    (staging / "comments.jsonl").write_text(comments_jsonl, encoding="utf-8")
-    (staging / "collection.json").write_text(collection_json, encoding="utf-8")
+    if staging.exists() or staging.is_symlink():
+        raise ArtifactCommitError("staging_exists")
+    temporary = staging.with_name(f".{staging.name}.writing")
+    if temporary.exists() or temporary.is_symlink():
+        raise ArtifactCommitError("generation_temporary_exists")
+    if not _make_directory(staging.parent) or not _make_directory(temporary):
+        raise ArtifactCommitError("generation_directory_creation_failed")
+
+    payloads = (
+        ("video.json", video.model_dump_json()),
+        ("comments.jsonl", "".join(f"{item.model_dump_json()}\n" for item in comments)),
+        ("collection.json", collection.model_dump_json()),
+    )
+    if not all(_write_text(temporary / name, content) for name, content in payloads):
+        _discard_partial_generation(temporary)
+        raise ArtifactCommitError("generation_write_failed")
+
+    validation_error: str | None = None
+    try:
+        validate_generation(temporary)
+    except ArtifactValidationError as error:
+        validation_error = str(error)
+    if validation_error is not None:
+        _discard_partial_generation(temporary)
+        raise ArtifactValidationError(validation_error)
+    if not _try_move_directory(temporary, staging):
+        _discard_partial_generation(temporary)
+        raise ArtifactCommitError("generation_publish_failed")
+
+
+def _read_bytes(path: Path) -> tuple[str | None, bytes]:
+    try:
+        return None, path.read_bytes()
+    except FileNotFoundError:
+        return "missing", b""
+    except OSError:
+        return "read_error", b""
+
+
+def _decode_utf8(data: bytes) -> str | None:
+    try:
+        return data.decode("utf-8")
+    except UnicodeError:
+        return None
+
+
+def _parse_json(line: str) -> tuple[bool, object]:
+    try:
+        return True, json.loads(line)
+    except (json.JSONDecodeError, RecursionError):
+        return False, None
+
+
+def _validate_model[ModelT: BaseModel](
+    value: object, model: type[ModelT]
+) -> tuple[ModelT | None, str | None]:
+    try:
+        return model.model_validate(value), None
+    except ValidationError as error:
+        category = (
+            "extra_field"
+            if any(item["type"] == "extra_forbidden" for item in error.errors())
+            else "schema"
+        )
+        return None, category
 
 
 def read_jsonl[ModelT: BaseModel](path: Path, model: type[ModelT]) -> list[ModelT]:
-    """Strictly parse and validate every non-empty JSON Lines record."""
+    """Strictly parse and validate every JSON Lines record."""
 
-    try:
-        source = path.open("r", encoding="utf-8")
-    except FileNotFoundError:
-        raise ArtifactValidationError("jsonl_missing") from None
-    except OSError:
-        raise ArtifactValidationError("jsonl_read_error") from None
+    read_error, data = _read_bytes(path)
+    if read_error is not None:
+        raise ArtifactValidationError(f"jsonl_{read_error}")
+    text = _decode_utf8(data)
+    if text is None:
+        raise ArtifactValidationError("jsonl_encoding_error")
 
     result: list[ModelT] = []
-    try:
-        with source:
-            for line_number, line in enumerate(source, start=1):
-                if not line.strip():
-                    raise ArtifactValidationError(f"jsonl_blank_line:line_{line_number}")
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError:
-                    raise ArtifactValidationError(f"jsonl_non_json:line_{line_number}") from None
-                try:
-                    result.append(model.model_validate(value))
-                except ValidationError as error:
-                    category = (
-                        "extra_field"
-                        if any(item["type"] == "extra_forbidden" for item in error.errors())
-                        else "schema"
-                    )
-                    raise ArtifactValidationError(f"jsonl_{category}:line_{line_number}") from None
-    except UnicodeError:
-        raise ArtifactValidationError("jsonl_encoding_error") from None
-    except OSError:
-        raise ArtifactValidationError("jsonl_read_error") from None
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            raise ArtifactValidationError(f"jsonl_blank_line:line_{line_number}")
+        parsed, value = _parse_json(line)
+        if not parsed:
+            raise ArtifactValidationError(f"jsonl_non_json:line_{line_number}")
+        item, validation_error = _validate_model(value, model)
+        if validation_error is not None:
+            raise ArtifactValidationError(f"jsonl_{validation_error}:line_{line_number}")
+        assert item is not None
+        result.append(item)
     return result
 
 
-def _read_json[ModelT: BaseModel](path: Path, model: type[ModelT], category: str) -> ModelT:
+def _validate_model_json[ModelT: BaseModel](
+    data: bytes, model: type[ModelT]
+) -> tuple[ModelT | None, str | None]:
     try:
-        value = path.read_bytes()
-    except FileNotFoundError:
-        raise ArtifactValidationError(f"{category}_missing") from None
-    except OSError:
-        raise ArtifactValidationError(f"{category}_read_error") from None
-    try:
-        return model.model_validate_json(value)
+        return model.model_validate_json(data), None
     except ValidationError as error:
-        error_category = (
+        category = (
             "bad_json"
             if any(item["type"] == "json_invalid" for item in error.errors())
             else "schema"
         )
-        raise ArtifactValidationError(f"{category}_{error_category}") from None
+        return None, category
+
+
+def _read_json[ModelT: BaseModel](path: Path, model: type[ModelT], category: str) -> ModelT:
+    read_error, data = _read_bytes(path)
+    if read_error is not None:
+        raise ArtifactValidationError(f"{category}_{read_error}")
+    item, validation_error = _validate_model_json(data, model)
+    if validation_error is not None:
+        raise ArtifactValidationError(f"{category}_{validation_error}")
+    assert item is not None
+    return item
+
+
+def _has_exact_artifact_entries(directory: Path) -> bool | None:
+    try:
+        entries = list(directory.iterdir())
+        names = {entry.name for entry in entries}
+        regular_files = all(entry.is_file() and not entry.is_symlink() for entry in entries)
+    except OSError:
+        return None
+    return names == _ARTIFACT_NAMES and regular_files
 
 
 def validate_generation(
     directory: Path,
 ) -> tuple[RawVideo, list[RawComment], CollectionRecord]:
-    """Load and validate one complete generation and its cross-file invariants."""
+    """Load and validate exactly one generation and its cross-file invariants."""
+
+    exact_entries = _has_exact_artifact_entries(directory)
+    if exact_entries is None:
+        raise ArtifactValidationError("generation_directory_unreadable")
+    if not exact_entries:
+        raise ArtifactValidationError("unexpected_directory_entries")
 
     video = _read_json(directory / "video.json", RawVideo, "video")
     comments = read_jsonl(directory / "comments.jsonl", RawComment)
@@ -135,33 +240,32 @@ def _move_directory(source: Path, destination: Path) -> None:
     source.replace(destination)
 
 
+def _try_move_directory(source: Path, destination: Path) -> bool:
+    try:
+        _move_directory(source, destination)
+    except OSError:
+        return False
+    return True
+
+
 def commit_generation(paths: CommitPaths) -> None:
     """Validate staging and atomically replace target with recoverable rollback."""
 
     validate_generation(paths.staging)
     if paths.backup.exists():
         raise ArtifactCommitError("backup_exists")
-    try:
-        paths.target.parent.mkdir(parents=True, exist_ok=True)
-        paths.backup.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        raise ArtifactCommitError("parent_creation_failed") from None
+    if not _make_directory(paths.target.parent) or not _make_directory(paths.backup.parent):
+        raise ArtifactCommitError("parent_creation_failed")
 
     had_target = paths.target.exists()
-    if had_target:
-        try:
-            _move_directory(paths.target, paths.backup)
-        except OSError:
-            raise ArtifactCommitError("target_backup_failed") from None
-    try:
-        _move_directory(paths.staging, paths.target)
-    except OSError:
-        if had_target and paths.backup.exists() and not paths.target.exists():
-            try:
-                _move_directory(paths.backup, paths.target)
-            except OSError:
-                raise ArtifactCommitError("staging_move_failed_recovery_failed") from None
-        raise ArtifactCommitError("staging_move_failed") from None
+    if had_target and not _try_move_directory(paths.target, paths.backup):
+        raise ArtifactCommitError("target_backup_failed")
+    if _try_move_directory(paths.staging, paths.target):
+        return
+    if had_target and paths.backup.exists() and not paths.target.exists():
+        if not _try_move_directory(paths.backup, paths.target):
+            raise ArtifactCommitError("staging_move_failed_recovery_failed")
+    raise ArtifactCommitError("staging_move_failed")
 
 
 def recover_interrupted_commit(paths: CommitPaths) -> bool:
@@ -169,9 +273,8 @@ def recover_interrupted_commit(paths: CommitPaths) -> bool:
 
     if not paths.backup.exists() or paths.target.exists():
         return False
-    try:
-        paths.target.parent.mkdir(parents=True, exist_ok=True)
-        _move_directory(paths.backup, paths.target)
-    except OSError:
-        raise ArtifactCommitError("backup_recovery_failed") from None
+    if not _make_directory(paths.target.parent):
+        raise ArtifactCommitError("backup_recovery_failed")
+    if not _try_move_directory(paths.backup, paths.target):
+        raise ArtifactCommitError("backup_recovery_failed")
     return True

@@ -1,9 +1,28 @@
 import json
+import math
 from pathlib import Path
 
 import pytest
 
-from requirementseeker_collector.audit import AuditLog, SensitiveAuditValue
+import requirementseeker_collector.audit as audit_module
+from requirementseeker_collector.audit import (
+    AuditLog,
+    AuditSerializationError,
+    AuditWriteError,
+    SensitiveAuditValue,
+)
+
+
+class ChangingItemsDict(dict[str, object]):
+    def __init__(self) -> None:
+        super().__init__({"cookie": "secret-marker"})
+        self.calls = 0
+
+    def items(self):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        if self.calls == 1:
+            return {"safe": "value"}.items()
+        return super().items()
 
 
 def test_sensitive_audit_value_does_not_create_output(tmp_path: Path) -> None:
@@ -15,6 +34,64 @@ def test_sensitive_audit_value_does_not_create_output(tmp_path: Path) -> None:
     assert "secret-marker" not in str(caught.value)
     assert not path.parent.exists()
     assert not path.exists()
+
+
+def test_audit_serializes_only_the_checked_mapping_snapshot(tmp_path: Path) -> None:
+    path = tmp_path / "run.jsonl"
+    fields = ChangingItemsDict()
+
+    AuditLog(path).write("response", fields)
+
+    assert fields.calls == 1
+    assert path.read_bytes() == b'{"event":"response","fields":{"safe":"value"}}\n'
+
+
+def test_audit_rejects_cycles_without_recursion_error(tmp_path: Path) -> None:
+    path = tmp_path / "run.jsonl"
+    fields: dict[str, object] = {}
+    fields["nested"] = fields
+
+    with pytest.raises(SensitiveAuditValue, match="cyclic_value"):
+        AuditLog(path).write("response", fields)
+
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_audit_rejects_non_standard_json_numbers(tmp_path: Path, value: float) -> None:
+    path = tmp_path / "run.jsonl"
+
+    with pytest.raises(AuditSerializationError, match="audit_serialization_failed"):
+        AuditLog(path).write("response", {"ratio": value})
+
+    assert not path.exists()
+
+
+def test_audit_parent_error_is_safe(tmp_path: Path) -> None:
+    blocker = tmp_path / "secret-marker"
+    blocker.write_text("file", encoding="utf-8")
+
+    with pytest.raises(AuditWriteError, match="audit_parent_creation_failed") as caught:
+        AuditLog(blocker / "nested" / "run.jsonl").write("response", {"safe": 1})
+
+    assert "secret-marker" not in repr(caught.value.args)
+    assert caught.value.__context__ is None
+
+
+def test_audit_failed_rewrite_keeps_previous_complete_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "run.jsonl"
+    log = AuditLog(path)
+    log.write("first", {"safe": 1})
+    before = path.read_bytes()
+
+    monkeypatch.setattr(audit_module, "_write_bytes", lambda _path, _data: False)
+
+    with pytest.raises(AuditWriteError, match="audit_temp_write_failed"):
+        log.write("second", {"safe": 2})
+
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize(

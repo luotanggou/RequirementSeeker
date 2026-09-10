@@ -149,6 +149,41 @@ def test_writer_creates_complete_round_trippable_generation(tmp_path: Path) -> N
     validate_generation(staging)
 
 
+def test_writer_refuses_existing_staging_without_changing_it(tmp_path: Path) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    marker = staging / "marker"
+    marker.write_text("old", encoding="utf-8")
+    video, comments, collection = valid_models()
+
+    with pytest.raises(ArtifactCommitError, match="staging_exists"):
+        write_generation(staging, video, comments, collection)
+
+    assert marker.read_text(encoding="utf-8") == "old"
+    assert sorted(path.name for path in staging.iterdir()) == ["marker"]
+
+
+def test_writer_failure_does_not_publish_partial_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staging = tmp_path / "staging"
+    video, comments, collection = valid_models()
+    original_write = artifacts._write_text
+
+    def fail_comments(path: Path, content: str) -> bool:
+        if path.name == "comments.jsonl":
+            return False
+        return original_write(path, content)
+
+    monkeypatch.setattr(artifacts, "_write_text", fail_comments)
+
+    with pytest.raises(ArtifactCommitError, match="generation_write_failed") as caught:
+        write_generation(staging, video, comments, collection)
+
+    assert caught.value.__context__ is None
+    assert not staging.exists()
+
+
 @pytest.mark.parametrize("case", ["missing", "blank", "non_json", "extra_field"])
 def test_read_jsonl_converts_input_errors_to_safe_validation_errors(
     tmp_path: Path, case: str
@@ -193,8 +228,10 @@ def test_validate_generation_rejects_invalid_generation(tmp_path: Path, invalid:
             RawComment.model_validate(comment_data("comment-1", raw_parent_comment_id="comment-1")),
             RawComment.model_validate(comment_data("comment-2")),
         ]
-        video, _, collection = valid_models()
-        write_generation(staging, video, comments, collection)
+        (staging / "comments.jsonl").write_text(
+            "".join(f"{comment.model_dump_json()}\n" for comment in comments),
+            encoding="utf-8",
+        )
     else:
         (staging / "collection.json").write_text(
             CollectionRecord.model_validate(collection_data(collected_total=1)).model_dump_json(),
@@ -205,6 +242,17 @@ def test_validate_generation_rejects_invalid_generation(tmp_path: Path, invalid:
         validate_generation(staging)
 
     assert "secret-marker" not in str(caught.value)
+
+
+def test_validate_generation_rejects_extra_directory_entries(tmp_path: Path) -> None:
+    staging = tmp_path / "staging"
+    write_valid(staging)
+    (staging / "fourth-secret.bin").write_bytes(b"secret-marker")
+
+    with pytest.raises(ArtifactValidationError, match="unexpected_directory_entries") as caught:
+        validate_generation(staging)
+
+    assert "fourth-secret" not in repr(caught.value.args)
 
 
 def test_invalid_staging_does_not_change_existing_target(tmp_path: Path) -> None:
@@ -331,6 +379,32 @@ def test_failed_staging_move_restores_old_target_or_leaves_target_absent(
             RawVideo.model_validate_json((paths.target / "video.json").read_bytes()).title
             == "旧结果"
         )
+
+
+def test_double_move_failure_has_no_sensitive_exception_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = CommitPaths(tmp_path / "staging", tmp_path / "target", tmp_path / "backup")
+    write_valid(paths.staging, title="新结果")
+    write_valid(paths.target, title="旧结果")
+
+    def fail_publish_and_restore(source: Path, destination: Path) -> None:
+        if source == paths.target:
+            source.replace(destination)
+            return
+        if source == paths.staging:
+            raise OSError("staging-secret")
+        raise OSError("rollback-secret")
+
+    monkeypatch.setattr(artifacts, "_move_directory", fail_publish_and_restore)
+
+    with pytest.raises(ArtifactCommitError, match="staging_move_failed_recovery_failed") as caught:
+        commit_generation(paths)
+
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
+    assert paths.backup.exists()
+    assert not paths.target.exists()
 
 
 def test_recover_interrupted_commit_restores_only_missing_target(tmp_path: Path) -> None:
