@@ -1,0 +1,200 @@
+import re
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+from requirementseeker_collector.adapters.base import ResponseShapeChanged
+from requirementseeker_collector.browser import (
+    BrowserSession,
+    BrowserSessionError,
+    perform_stratum_action,
+)
+
+
+def fake_playwright():
+    events = []
+    page = Mock()
+    context = Mock()
+    browser = Mock()
+    runtime = Mock()
+    manager = Mock()
+    manager.start.return_value = runtime
+    runtime.chromium.launch.return_value = browser
+    browser.new_context.return_value = context
+    context.new_page.return_value = page
+    for name, resource in [("page", page), ("context", context), ("browser", browser)]:
+        resource.close.side_effect = lambda name=name: events.append(name)
+    runtime.stop.side_effect = lambda: events.append("playwright")
+    return SimpleNamespace(
+        factory=Mock(return_value=manager),
+        manager=manager,
+        runtime=runtime,
+        browser=browser,
+        context=context,
+        page=page,
+        events=events,
+    )
+
+
+def test_browser_launch_is_headed_and_not_persistent():
+    fake = fake_playwright()
+    with BrowserSession(fake.factory) as session:
+        assert session.page is fake.page
+    fake.runtime.chromium.launch.assert_called_once_with(headless=False)
+    fake.browser.new_context.assert_called_once_with()
+    fake.runtime.chromium.launch_persistent_context.assert_not_called()
+    assert fake.events == ["page", "context", "browser", "playwright"]
+
+
+@pytest.mark.parametrize("stage", ["launch", "context", "page"])
+def test_start_failure_cleans_up_acquired_resources(stage):
+    fake = fake_playwright()
+    calls = {
+        "launch": fake.runtime.chromium.launch,
+        "context": fake.browser.new_context,
+        "page": fake.context.new_page,
+    }
+    calls[stage].side_effect = RuntimeError("secret-marker")
+    with pytest.raises(BrowserSessionError) as caught:
+        with BrowserSession(fake.factory):
+            pytest.fail("must not enter")
+    assert caught.value.__context__ is None
+    assert "secret-marker" not in str(caught.value)
+    assert (
+        fake.events
+        == {
+            "launch": ["playwright"],
+            "context": ["browser", "playwright"],
+            "page": ["context", "browser", "playwright"],
+        }[stage]
+    )
+
+
+def test_close_failure_does_not_prevent_other_cleanup():
+    fake = fake_playwright()
+    fake.page.close.side_effect = RuntimeError("secret-marker")
+    with pytest.raises(BrowserSessionError) as caught:
+        with BrowserSession(fake.factory):
+            pass
+    assert fake.events == ["context", "browser", "playwright"]
+    assert caught.value.__context__ is None
+    assert "secret-marker" not in str(caught.value)
+
+
+def test_body_failure_still_closes_all_resources():
+    fake = fake_playwright()
+    with pytest.raises(ValueError, match="caller_failure"):
+        with BrowserSession(fake.factory):
+            raise ValueError("caller_failure")
+    assert fake.events == ["page", "context", "browser", "playwright"]
+
+
+def test_response_callback_precedes_navigation_and_only_forwards_supported_json():
+    fake = fake_playwright()
+    response = Mock(url="https://example.test/comments")
+    response.json.return_value = {"comments": []}
+    adapter = Mock()
+    adapter.response_kind.side_effect = lambda url: "comments" if url == response.url else None
+    consumer = Mock()
+    callbacks = []
+    fake.page.on.side_effect = lambda event, callback: callbacks.append((event, callback))
+
+    def navigate(url):
+        assert callbacks[0][0] == "response"
+        callbacks[0][1](response)
+        unknown = Mock(url="https://example.test/other")
+        callbacks[0][1](unknown)
+        unknown.json.assert_not_called()
+
+    fake.page.goto.side_effect = navigate
+    with BrowserSession(fake.factory) as session:
+        session.open("https://example.test/video", adapter, consumer)
+    consumer.assert_called_once_with(response.url, {"comments": []})
+    assert response.mock_calls == [(("json"), (), {})]
+
+
+def test_bad_response_json_has_safe_error():
+    fake = fake_playwright()
+    response = Mock(url="https://example.test/comments")
+    response.json.side_effect = ValueError("secret-marker")
+    with BrowserSession(fake.factory) as session:
+        session.open("https://example.test/video", Mock(), Mock())
+        callback = fake.page.on.call_args.args[1]
+        with pytest.raises(BrowserSessionError) as caught:
+            callback(response)
+        assert caught.value.__context__ is None
+        assert "secret-marker" not in str(caught.value)
+
+
+def test_repeated_navigation_does_not_duplicate_consumers():
+    fake = fake_playwright()
+    with BrowserSession(fake.factory) as session:
+        session.open("https://example.test/first", Mock(), Mock())
+        first_callback = fake.page.on.call_args.args[1]
+        session.open("https://example.test/second", Mock(), Mock())
+        fake.page.remove_listener.assert_called_once_with("response", first_callback)
+
+
+def test_navigation_failure_has_no_sensitive_context():
+    fake = fake_playwright()
+    fake.page.goto.side_effect = RuntimeError("secret-marker")
+    with pytest.raises(BrowserSessionError) as caught:
+        with BrowserSession(fake.factory) as session:
+            session.open("https://example.test/video", Mock(), Mock())
+    assert caught.value.__context__ is None
+    assert "secret-marker" not in str(caught.value)
+    assert fake.events == ["page", "context", "browser", "playwright"]
+
+
+def test_navigation_preserves_adapter_shape_failure_category():
+    fake = fake_playwright()
+    response = Mock(url="https://example.test/comments")
+    consumer = Mock(side_effect=ResponseShapeChanged("response_shape_changed"))
+    fake.page.goto.side_effect = lambda url: fake.page.on.call_args.args[1](response)
+    with pytest.raises(ResponseShapeChanged):
+        with BrowserSession(fake.factory) as session:
+            session.open("https://example.test/video", Mock(), consumer)
+
+
+@pytest.mark.parametrize(
+    ("stratum", "label"),
+    [
+        ("top", "最热"),
+        ("top", "热门"),
+        ("recent", "最新"),
+        ("recent", "按时间"),
+        ("replies", "展开 2 条回复"),
+        ("replies", "查看回复"),
+    ],
+)
+def test_stratum_action_uses_visible_controls(stratum, label):
+    page = Mock()
+    control = Mock()
+    control.is_visible.return_value = True
+
+    def by_role(role, *, name):
+        assert role in ("button", "tab", "link")
+        assert isinstance(name, re.Pattern)
+        return SimpleNamespace(all=lambda: [control] if name.fullmatch(label) else [])
+
+    page.get_by_role.side_effect = by_role
+    assert perform_stratum_action(page, stratum) == "performed"
+    control.click.assert_called_once_with()
+
+
+def test_missing_or_hidden_control_is_unavailable():
+    page = Mock()
+    hidden = Mock()
+    hidden.is_visible.return_value = False
+    page.get_by_role.return_value.all.return_value = [hidden]
+    assert perform_stratum_action(page, "recent") == "unavailable"
+    hidden.click.assert_not_called()
+    page.locator.assert_not_called()
+
+
+def test_long_tail_advances_scroll_order():
+    page = Mock()
+    assert perform_stratum_action(page, "long_tail") == "performed"
+    page.mouse.wheel.assert_called_once_with(0, 600)
+    page.get_by_role.assert_not_called()

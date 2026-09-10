@@ -1,0 +1,132 @@
+"""Ephemeral headed browsing and visible, deterministic page actions."""
+
+import re
+from collections.abc import Callable
+from contextlib import ExitStack
+from types import TracebackType
+from typing import Literal, Protocol, Self
+
+from playwright.sync_api import Page, Playwright, Response, sync_playwright
+
+from requirementseeker_collector.adapters.base import PlatformAdapter, ResponseShapeChanged
+from requirementseeker_collector.contracts import Stratum
+
+
+class BrowserSessionError(RuntimeError):
+    """A fixed browser failure category without underlying response details."""
+
+
+class PlaywrightStarter(Protocol):
+    def start(self) -> Playwright: ...
+
+
+class BrowserSession:
+    def __init__(
+        self, playwright_factory: Callable[[], PlaywrightStarter] = sync_playwright
+    ) -> None:
+        self._factory = playwright_factory
+        self._stack = ExitStack()
+        self._cleanup_failed = False
+        self._page: Page | None = None
+        self._response_callback: Callable[[Response], None] | None = None
+
+    @property
+    def page(self) -> Page:
+        if self._page is None:
+            raise BrowserSessionError("browser_not_open")
+        return self._page
+
+    def _close(self, close: Callable[[], object]) -> None:
+        try:
+            close()
+        except Exception:
+            self._cleanup_failed = True
+
+    def __enter__(self) -> Self:
+        started = False
+        try:
+            runtime = self._factory().start()
+            self._stack.callback(self._close, runtime.stop)
+            browser = runtime.chromium.launch(headless=False)
+            self._stack.callback(self._close, browser.close)
+            context = browser.new_context()
+            self._stack.callback(self._close, context.close)
+            self._page = context.new_page()
+            self._stack.callback(self._close, self._page.close)
+            started = True
+        except Exception:
+            pass
+        finally:
+            if not started:
+                self._stack.close()
+        if not started:
+            raise BrowserSessionError("browser_start_failed")
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._stack.close()
+        self._page = None
+        if self._cleanup_failed and exc_type is None:
+            raise BrowserSessionError("browser_cleanup_failed")
+
+    def open(
+        self,
+        url: str,
+        adapter: PlatformAdapter,
+        consume: Callable[[str, object], None],
+    ) -> None:
+        def on_response(response: Response) -> None:
+            response_url = response.url
+            if adapter.response_kind(response_url) is None:
+                return
+            decoded = False
+            payload: object = None
+            try:
+                payload = response.json()
+                decoded = True
+            except Exception:
+                pass
+            if not decoded:
+                raise BrowserSessionError("response_json_failed")
+            consume(response_url, payload)
+
+        navigated = False
+        shape_changed = False
+        try:
+            if self._response_callback is not None:
+                self.page.remove_listener("response", self._response_callback)
+            self.page.on("response", on_response)
+            self._response_callback = on_response
+            self.page.goto(url)
+            navigated = True
+        except ResponseShapeChanged:
+            shape_changed = True
+        except Exception:
+            pass
+        if shape_changed:
+            raise ResponseShapeChanged("response_shape_changed")
+        if not navigated:
+            raise BrowserSessionError("browser_navigation_failed")
+
+
+def perform_stratum_action(page: Page, stratum: Stratum) -> Literal["performed", "unavailable"]:
+    if stratum == "long_tail":
+        page.mouse.wheel(0, 600)
+        return "performed"
+    patterns = {
+        "top": r"^(最热|热门)$",
+        "recent": r"^(最新|按时间)$",
+        "replies": r"^(展开|查看).*回复$",
+    }
+    label = re.compile(patterns[stratum])
+    for role in ("button", "tab", "link"):
+        for control in page.get_by_role(role, name=label).all():
+            if control.is_visible():
+                control.click()
+                return "performed"
+    return "unavailable"
