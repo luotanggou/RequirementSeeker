@@ -330,7 +330,7 @@ git commit -m "feat(collector): add idempotent comment merging"
 - Create: `packages/collector/tests/test_audit.py`
 - Create: `packages/collector/tests/test_artifacts.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_audit_rejects_sensitive_keys(tmp_path: Path) -> None:
@@ -354,13 +354,13 @@ def test_interrupted_backup_is_recovered(tmp_path: Path) -> None:
     assert not paths.backup.exists()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/test_audit.py packages/collector/tests/test_artifacts.py -q`
 
 Expected: imports fail because audit and artifact modules are absent.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `AuditLog.write` recursively rejects case-insensitive key fragments `cookie`, `token`, `authorization`, `password`, `request_headers`, `response_body`, `storage_state`, then appends sorted ASCII JSON. `ArtifactWriter` must write all three files under `.staging`, validate every model plus cross-file invariants, move an existing target to `.backup`, move staging to target, restore backup on failure, and recover a backup with no target on the next invocation.
 
@@ -393,13 +393,13 @@ def validate_generation(directory: Path) -> None:
         raise ArtifactValidationError("invalid_platform")
 ```
 
-- [ ] **Step 4: Run tests and static checks**
+- [x] **Step 4: Run tests and static checks**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/test_audit.py packages/collector/tests/test_artifacts.py -q && uv run --project packages/collector ruff check packages/collector && uv run --project packages/collector mypy packages/collector/src`
 
 Expected: audit and recovery tests pass; no sensitive marker is written.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector/src/requirementseeker_collector/audit.py packages/collector/src/requirementseeker_collector/artifacts.py packages/collector/tests/test_audit.py packages/collector/tests/test_artifacts.py
