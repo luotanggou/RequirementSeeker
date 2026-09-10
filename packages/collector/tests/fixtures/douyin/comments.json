@@ -1,0 +1,26 @@
+{
+  "status_code": 0,
+  "comments": [
+    {
+      "cid": "21",
+      "user": {},
+      "text": "Artificial comment with unavailable author",
+      "create_time": 1789000100,
+      "digg_count": 4,
+      "reply_comment_total": 1
+    },
+    {
+      "cid": "22",
+      "user": {
+        "uid": "author"
+      },
+      "reply_id": "21",
+      "text": "Artificial inline reply",
+      "create_time": 1789000200,
+      "digg_count": 1,
+      "reply_comment_total": 0
+    }
+  ],
+  "has_more": true,
+  "cursor": 2
+}

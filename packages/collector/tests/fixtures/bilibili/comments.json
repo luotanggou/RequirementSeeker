@@ -1,0 +1,37 @@
+{
+  "code": 0,
+  "data": {
+    "cursor": {
+      "is_end": true,
+      "next": 2
+    },
+    "replies": [
+      {
+        "rpid": 11,
+        "member": {
+          "mid": 42
+        },
+        "content": {
+          "message": "Top-level artificial comment"
+        },
+        "ctime": 1789000100,
+        "like": 3,
+        "rcount": 1,
+        "replies": [
+          {
+            "rpid": 12,
+            "member": {
+              "mid": 99
+            },
+            "content": {
+              "message": "Artificial nested reply"
+            },
+            "ctime": 1789000200,
+            "like": 1,
+            "rcount": 0
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "status_code": 0,
+  "aweme_detail": {
+    "aweme_id": "7390000000000000000",
+    "author": {
+      "sec_uid": "author",
+      "follower_count": 5000
+    },
+    "desc": "Synthetic Douyin Video",
+    "create_time": 1789000000,
+    "duration": 125000,
+    "statistics": {
+      "comment_count": 2,
+      "play_count": 1000,
+      "digg_count": 100,
+      "collect_count": 50,
+      "share_count": 10
+    }
+  }
+}

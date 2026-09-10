@@ -1,0 +1,20 @@
+{
+  "code": 0,
+  "data": {
+    "bvid": "BV1synthetic",
+    "owner": {
+      "mid": 42
+    },
+    "title": "Synthetic Bilibili Video",
+    "desc": "Artificial fixture",
+    "pubdate": 1789000000,
+    "duration": 125,
+    "stat": {
+      "reply": 2,
+      "view": 1000,
+      "like": 100,
+      "favorite": 50,
+      "share": 10
+    }
+  }
+}
