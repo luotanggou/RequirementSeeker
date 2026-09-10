@@ -420,7 +420,7 @@ git commit -m "feat(collector): add safe artifact commits and audit"
 - Create: `packages/collector/tests/adapters/test_bilibili.py`
 - Create: `packages/collector/tests/adapters/test_douyin.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_bilibili_parses_top_level_and_reply() -> None:
@@ -441,13 +441,13 @@ def test_unknown_success_shape_closes(adapter: PlatformAdapter) -> None:
         adapter.parse_comment_response({"unexpected": []}, "top", 1, video_author_id="author")
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/adapters -q`
 
 Expected: adapter imports fail.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Define a `PlatformAdapter` protocol returning `ParsedVideo` and `ParsedCommentPage`. Recognize only Bilibili `/x/web-interface/view`, `/x/v2/reply/wbi/main`, `/x/v2/reply/reply` and Douyin `/aweme/v1/web/aweme/detail`, `/aweme/v1/web/comment/list`, `/aweme/v1/web/comment/list/reply` response families. Parse artificial fixtures using these exact field mappings:
 
@@ -491,13 +491,13 @@ def douyin_comment(comment: Mapping[str, Any], stratum: Stratum, rank: int, vide
 
 Nested Bilibili replies use the containing top-level `rpid`; Douyin reply responses use the requested parent ID. The parser receives the validated video author ID and deterministically fills `is_video_author` for known authors. Missing required ID/text raises `ResponseShapeChanged`; optional unavailable values remain `None`.
 
-- [ ] **Step 4: Run adapter tests**
+- [x] **Step 4: Run adapter tests**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/adapters -q`
 
 Expected: both fixture suites pass, including unknown shape rejection.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector/src/requirementseeker_collector/adapters packages/collector/tests/adapters packages/collector/tests/fixtures
