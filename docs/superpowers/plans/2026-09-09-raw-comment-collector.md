@@ -512,7 +512,7 @@ git commit -m "feat(collector): add bilibili and douyin response adapters"
 - Create: `packages/collector/tests/test_browser.py`
 - Create: `packages/collector/tests/test_challenges.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_browser_launch_is_headed_and_not_persistent(fake_playwright: FakePlaywright) -> None:
@@ -545,25 +545,25 @@ def test_challenge_attempts_once_and_writes_safe_audit(tmp_path: Path) -> None:
     assert not hasattr(handler, "retry")
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/test_browser.py packages/collector/tests/test_challenges.py -q`
 
 Expected: browser and challenge imports fail.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Use `sync_playwright`; call only `browser_type.launch(headless=False)` and `browser.new_context()`, never `launch_persistent_context`, `storage_state`, request headers, cookies, or local user-data directories. Register response callbacks before `page.goto` and pass only `response.json()` payload plus URL to the adapter. `perform_stratum_action` uses visible accessible labels for `最热|热门`, `最新|按时间`, and `展开|查看 ... 回复`; a missing control records that stratum as unavailable instead of guessing a hidden selector. `long_tail` advances the actual stable page/scroll order and never claims random selection.
 
 `ChallengeHandler.attempt` masks password inputs with DOM styling before page-only screenshots, writes `before.png`, performs one visible `DragAction` or `ClickAction`, writes `after.png`, and appends an action object containing only time, action type, coordinates or element category, duration and result. Confirmation is a blocking CLI prompt that requires exact `yes`; browser keyboard events are never observed.
 
-- [ ] **Step 4: Run browser unit tests**
+- [x] **Step 4: Run browser unit tests**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/test_browser.py packages/collector/tests/test_challenges.py -q && uv run --project packages/collector mypy packages/collector/src`
 
 Expected: headed/ephemeral and single-attempt guarantees pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector/src/requirementseeker_collector/browser.py packages/collector/src/requirementseeker_collector/challenges.py packages/collector/tests/test_browser.py packages/collector/tests/test_challenges.py
