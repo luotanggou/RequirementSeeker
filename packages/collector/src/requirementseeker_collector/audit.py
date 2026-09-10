@@ -149,6 +149,8 @@ class AuditLog:
         read_succeeded, existing = _read_existing(self.path)
         if not read_succeeded:
             raise AuditWriteError("audit_existing_read_failed")
+        if existing and not existing.endswith(b"\n"):
+            existing += b"\n"
         temporary = self.path.with_name(f".{self.path.name}.tmp")
         if temporary.exists():
             raise AuditWriteError("audit_temporary_exists")

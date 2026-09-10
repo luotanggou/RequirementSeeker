@@ -180,3 +180,15 @@ def test_legal_audit_entries_are_ascii_compact_and_appended(tmp_path: Path) -> N
         {"event": "collection", "fields": {"count": 2, "message": "完成"}},
         {"event": "collection", "fields": {"count": 2, "message": "完成"}},
     ]
+
+
+def test_audit_appends_after_existing_final_line_without_newline(tmp_path: Path) -> None:
+    path = tmp_path / "run.jsonl"
+    path.write_bytes(b'{"event":"old","fields":{}}')
+
+    AuditLog(path).write("new", {"safe": 1})
+
+    assert [json.loads(line) for line in path.read_text(encoding="ascii").splitlines()] == [
+        {"event": "old", "fields": {}},
+        {"event": "new", "fields": {"safe": 1}},
+    ]
