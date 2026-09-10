@@ -103,15 +103,16 @@ class BrowserSession:
             if failed:
                 raise BrowserSessionError("response_processing_failed")
 
+        page = self.page
         navigated = False
         shape_changed = False
         response_failed = False
         try:
             if self._response_callback is not None:
-                self.page.remove_listener("response", self._response_callback)
-            self.page.on("response", on_response)
+                page.remove_listener("response", self._response_callback)
+            page.on("response", on_response)
             self._response_callback = on_response
-            self.page.goto(url)
+            page.goto(url)
             navigated = True
         except ResponseShapeChanged:
             shape_changed = True

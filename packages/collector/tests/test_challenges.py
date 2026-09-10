@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
@@ -18,11 +19,11 @@ def fake_challenge_page():
         events.append("masked")
         return Mock()
 
-    def screenshot(*, path, full_page):
+    def screenshot(*, full_page):
         assert events[-1] == "masked"
         assert full_page is False
-        Path(path).write_bytes(b"fake-page-image")
-        events.append(Path(path).name)
+        events.append("screenshot")
+        return b"fake-page-image"
 
     page.add_style_tag.side_effect = style
     page.frames = [page]
@@ -109,9 +110,12 @@ def test_failure_is_safe_and_never_retried(tmp_path, monkeypatch, stage):
         page.add_style_tag.side_effect = failure
     elif stage in ("before", "after"):
         original = page.screenshot.side_effect
+        calls = 0
 
         def screenshot(**kwargs):
-            if Path(kwargs["path"]).name == f"{stage}.png":
+            nonlocal calls
+            calls += 1
+            if calls == (1 if stage == "before" else 2):
                 raise failure
             return original(**kwargs)
 
@@ -119,9 +123,14 @@ def test_failure_is_safe_and_never_retried(tmp_path, monkeypatch, stage):
     elif stage == "mouse":
         page.mouse.move.side_effect = [None, failure]
     else:
-        monkeypatch.setattr(
-            "requirementseeker_collector.challenges.AuditLog.write", Mock(side_effect=failure)
-        )
+        original = Path.open
+
+        def open_file(path, *args, **kwargs):
+            if path.name == "actions.jsonl":
+                raise failure
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", open_file)
     handler = ChallengeHandler(tmp_path, confirm=lambda: True)
     action = DragAction((10, 20), (80, 20), 750)
     result = handler.attempt(page, action)
@@ -164,6 +173,64 @@ def test_existing_artifact_is_not_overwritten_or_followed(tmp_path):
     assert result.status == "failed"
     assert existing.read_bytes() == b"prior"
     assert not page.mock_calls
+
+
+@pytest.mark.parametrize(("artifact", "screenshot_number"), [("before.png", 1), ("after.png", 2)])
+def test_screenshot_race_does_not_overwrite_hardlink_target(tmp_path, artifact, screenshot_number):
+    victim = tmp_path / f"{artifact}-victim"
+    victim.write_bytes(b"victim-image")
+    target = tmp_path / artifact
+    page = fake_challenge_page()
+    calls = 0
+
+    def racing_screenshot(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == screenshot_number:
+            os.link(victim, target)
+        data = b"new-page-image"
+        if path := kwargs.get("path"):
+            Path(path).write_bytes(data)
+        return data
+
+    page.screenshot.side_effect = racing_screenshot
+    result = ChallengeHandler(tmp_path, confirm=lambda: True).attempt(page, ClickAction((10, 20)))
+
+    assert result.status == "failed"
+    assert victim.read_bytes() == b"victim-image"
+    assert target.samefile(victim)
+    if artifact == "before.png":
+        assert not page.mouse.mock_calls
+    else:
+        page.mouse.click.assert_called_once_with(10, 20, delay=100)
+    assert b"victim-image" not in (tmp_path / "actions.jsonl").read_bytes()
+
+
+def test_audit_race_does_not_read_or_replace_hardlink_target(tmp_path):
+    victim = tmp_path / "audit-victim.jsonl"
+    victim.write_bytes(b"secret-marker")
+    target = tmp_path / "actions.jsonl"
+    page = fake_challenge_page()
+    calls = 0
+
+    def racing_screenshot(**kwargs):
+        nonlocal calls
+        calls += 1
+        data = b"fake-page-image"
+        if path := kwargs.get("path"):
+            Path(path).write_bytes(data)
+        if calls == 2:
+            os.link(victim, target)
+        return data
+
+    page.screenshot.side_effect = racing_screenshot
+    result = ChallengeHandler(tmp_path, confirm=lambda: True).attempt(page, ClickAction((10, 20)))
+
+    assert result.status == "failed"
+    assert victim.read_bytes() == b"secret-marker"
+    assert target.samefile(victim)
+    assert b"secret-marker" not in (tmp_path / "before.png").read_bytes()
+    assert b"secret-marker" not in (tmp_path / "after.png").read_bytes()
 
 
 def test_output_directory_can_be_created_but_no_child_path_is_caller_controlled(tmp_path):

@@ -1,5 +1,6 @@
 """One explicitly supervised mouse action with local, masked page evidence."""
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -7,8 +8,6 @@ from pathlib import Path
 from typing import Literal
 
 from playwright.sync_api import ElementHandle, Page
-
-from requirementseeker_collector.audit import AuditLog
 
 
 def _validate_action(points: tuple[tuple[int, int], ...], duration: int) -> None:
@@ -77,6 +76,29 @@ def _perform_action(page: Page, action: DragAction | ClickAction) -> bool:
     return True
 
 
+def _serialize_action(fields: dict[str, object]) -> bytes | None:
+    try:
+        line = json.dumps(
+            {"event": "challenge_action", "fields": fields},
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return f"{line}\n".encode("ascii")
+    except (Exception, KeyboardInterrupt):
+        return None
+
+
+def _create_exclusive(path: Path, data: bytes) -> bool:
+    try:
+        with path.open("xb") as output:
+            written = output.write(data)
+    except (Exception, KeyboardInterrupt):
+        return False
+    return written == len(data)
+
+
 class ChallengeHandler:
     """Own one challenge directory and allow at most one confirmed attempt."""
 
@@ -124,12 +146,14 @@ class ChallengeHandler:
         try:
             for frame in page.frames:
                 styles.append(frame.add_style_tag(content=_MASK_STYLE))
-            page.screenshot(path=self._directory / "before.png", full_page=False)
-            acted = _perform_action(page, action)
-            for frame in page.frames:
-                styles.append(frame.add_style_tag(content=_MASK_STYLE))
-            page.screenshot(path=self._directory / "after.png", full_page=False)
-            status = "attempted" if acted else "failed"
+            before = page.screenshot(full_page=False)
+            if type(before) is bytes and _create_exclusive(self._directory / "before.png", before):
+                acted = _perform_action(page, action)
+                for frame in page.frames:
+                    styles.append(frame.add_style_tag(content=_MASK_STYLE))
+                after = page.screenshot(full_page=False)
+                if type(after) is bytes and _create_exclusive(self._directory / "after.png", after):
+                    status = "attempted" if acted else "failed"
         except (Exception, KeyboardInterrupt):
             pass
         finally:
@@ -148,8 +172,7 @@ class ChallengeHandler:
             "duration": action.duration,
             "result": status,
         }
-        try:
-            AuditLog(self._directory / "actions.jsonl").write("challenge_action", fields)
-        except Exception:
+        encoded = _serialize_action(fields)
+        if encoded is None or not _create_exclusive(self._directory / "actions.jsonl", encoded):
             status = "failed"
         return ChallengeResult(status)

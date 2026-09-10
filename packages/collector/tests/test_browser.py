@@ -145,6 +145,13 @@ def test_repeated_navigation_does_not_duplicate_consumers():
         fake.page.remove_listener.assert_called_once_with("response", first_callback)
 
 
+def test_open_outside_active_session_preserves_not_open_category():
+    session = BrowserSession(Mock())
+    with pytest.raises(BrowserSessionError) as caught:
+        session.open("https://example.test/video", Mock(), Mock())
+    assert_safe_exception(caught.value, BrowserSessionError, "browser_not_open")
+
+
 def test_navigation_failure_has_no_sensitive_context():
     fake = fake_playwright()
     fake.page.goto.side_effect = RuntimeError("secret-marker")
