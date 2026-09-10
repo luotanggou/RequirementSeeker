@@ -25,6 +25,11 @@ class ChangingItemsDict(dict[str, object]):
         return super().items()
 
 
+class RaisingItemsDict(dict[str, object]):
+    def items(self):  # type: ignore[no-untyped-def]
+        raise SensitiveAuditValue("secret-marker")
+
+
 def test_sensitive_audit_value_does_not_create_output(tmp_path: Path) -> None:
     path = tmp_path / "missing" / "run.jsonl"
 
@@ -54,6 +59,17 @@ def test_audit_rejects_cycles_without_recursion_error(tmp_path: Path) -> None:
     with pytest.raises(SensitiveAuditValue, match="cyclic_value"):
         AuditLog(path).write("response", fields)
 
+    assert not path.exists()
+
+
+def test_audit_does_not_trust_exception_text_from_mapping(tmp_path: Path) -> None:
+    path = tmp_path / "run.jsonl"
+
+    with pytest.raises(SensitiveAuditValue, match="audit_snapshot_failed") as caught:
+        AuditLog(path).write("response", RaisingItemsDict())
+
+    assert "secret-marker" not in repr(caught.value.args)
+    assert caught.value.__context__ is None
     assert not path.exists()
 
 

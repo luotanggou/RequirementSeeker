@@ -17,6 +17,10 @@ class AuditWriteError(RuntimeError):
     """Raised when an audit entry cannot be committed safely."""
 
 
+class _UnsafeAuditValue(ValueError):
+    """Internal signal whose message is always a fixed safe category."""
+
+
 _FORBIDDEN_KEY_FRAGMENTS = (
     "cookie",
     "token",
@@ -32,17 +36,17 @@ def _snapshot_value(value: object, active_containers: set[int]) -> object:
     if isinstance(value, Mapping):
         container_id = id(value)
         if container_id in active_containers:
-            raise SensitiveAuditValue("cyclic_value")
+            raise _UnsafeAuditValue("cyclic_value")
         active_containers.add(container_id)
         try:
             snapshot: dict[str, object] = {}
             for key, nested_value in value.items():
                 if not isinstance(key, str):
-                    raise SensitiveAuditValue("non_string_key")
+                    raise _UnsafeAuditValue("non_string_key")
                 normalized_key = key.casefold()
                 for fragment in _FORBIDDEN_KEY_FRAGMENTS:
                     if fragment in normalized_key:
-                        raise SensitiveAuditValue(fragment)
+                        raise _UnsafeAuditValue(fragment)
                 snapshot[key] = _snapshot_value(nested_value, active_containers)
             return snapshot
         finally:
@@ -50,7 +54,7 @@ def _snapshot_value(value: object, active_containers: set[int]) -> object:
     if isinstance(value, list | tuple):
         container_id = id(value)
         if container_id in active_containers:
-            raise SensitiveAuditValue("cyclic_value")
+            raise _UnsafeAuditValue("cyclic_value")
         active_containers.add(container_id)
         try:
             return [_snapshot_value(item, active_containers) for item in value]
@@ -62,7 +66,7 @@ def _snapshot_value(value: object, active_containers: set[int]) -> object:
 def _snapshot_fields(fields: Mapping[str, object]) -> tuple[dict[str, object] | None, str | None]:
     try:
         snapshot = _snapshot_value(fields, set())
-    except SensitiveAuditValue as error:
+    except _UnsafeAuditValue as error:
         return None, str(error)
     except Exception:
         return None, "audit_snapshot_failed"
