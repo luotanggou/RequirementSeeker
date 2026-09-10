@@ -76,6 +76,21 @@ def _discard_partial_generation(directory: Path) -> None:
         pass
 
 
+def _serialize_generation(
+    video: RawVideo,
+    comments: Sequence[RawComment],
+    collection: CollectionRecord,
+) -> tuple[tuple[str, str], ...] | None:
+    try:
+        return (
+            ("video.json", video.model_dump_json()),
+            ("comments.jsonl", "".join(f"{item.model_dump_json()}\n" for item in comments)),
+            ("collection.json", collection.model_dump_json()),
+        )
+    except Exception:
+        return None
+
+
 def write_generation(
     staging: Path,
     video: RawVideo,
@@ -89,14 +104,12 @@ def write_generation(
     temporary = staging.with_name(f".{staging.name}.writing")
     if temporary.exists() or temporary.is_symlink():
         raise ArtifactCommitError("generation_temporary_exists")
+    payloads = _serialize_generation(video, comments, collection)
+    if payloads is None:
+        raise ArtifactValidationError("generation_serialization_failed")
     if not _make_directory(staging.parent) or not _make_directory(temporary):
         raise ArtifactCommitError("generation_directory_creation_failed")
 
-    payloads = (
-        ("video.json", video.model_dump_json()),
-        ("comments.jsonl", "".join(f"{item.model_dump_json()}\n" for item in comments)),
-        ("collection.json", collection.model_dump_json()),
-    )
     if not all(_write_text(temporary / name, content) for name, content in payloads):
         _discard_partial_generation(temporary)
         raise ArtifactCommitError("generation_write_failed")
@@ -161,8 +174,11 @@ def read_jsonl[ModelT: BaseModel](path: Path, model: type[ModelT]) -> list[Model
     if text is None:
         raise ArtifactValidationError("jsonl_encoding_error")
 
+    lines = text.split("\n")
+    if lines and not lines[-1]:
+        lines.pop()
     result: list[ModelT] = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    for line_number, line in enumerate(lines, start=1):
         if not line.strip():
             raise ArtifactValidationError(f"jsonl_blank_line:line_{line_number}")
         parsed, value = _parse_json(line)

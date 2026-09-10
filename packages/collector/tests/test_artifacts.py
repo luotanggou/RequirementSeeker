@@ -149,6 +149,33 @@ def test_writer_creates_complete_round_trippable_generation(tmp_path: Path) -> N
     validate_generation(staging)
 
 
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+def test_writer_round_trips_unicode_line_separators(tmp_path: Path, separator: str) -> None:
+    staging = tmp_path / "staging"
+    video, comments, collection = valid_models()
+    comments[0].text = f"before{separator}after"
+
+    write_generation(staging, video, comments, collection)
+
+    _, loaded, _ = validate_generation(staging)
+    assert loaded[0].text == f"before{separator}after"
+
+
+def test_writer_serialization_failure_is_safe_and_leaves_no_temporary_directory(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "staging"
+    video, comments, collection = valid_models()
+    video.title = object()  # type: ignore[assignment]
+
+    with pytest.raises(ArtifactValidationError, match="generation_serialization_failed") as caught:
+        write_generation(staging, video, comments, collection)
+
+    assert caught.value.__context__ is None
+    assert not staging.exists()
+    assert not staging.with_name(".staging.writing").exists()
+
+
 def test_writer_refuses_existing_staging_without_changing_it(tmp_path: Path) -> None:
     staging = tmp_path / "staging"
     staging.mkdir()
