@@ -1,6 +1,7 @@
 import re
+import traceback
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, PropertyMock
 
 import pytest
 
@@ -10,6 +11,14 @@ from requirementseeker_collector.browser import (
     BrowserSessionError,
     perform_stratum_action,
 )
+
+
+def assert_safe_exception(error, expected_type, expected_message):
+    assert type(error) is expected_type
+    assert str(error) == expected_message
+    assert error.__context__ is None
+    assert error.__cause__ is None
+    assert "secret-marker" not in "".join(traceback.format_exception(error))
 
 
 def fake_playwright():
@@ -157,6 +166,65 @@ def test_navigation_preserves_adapter_shape_failure_category():
             session.open("https://example.test/video", Mock(), consumer)
 
 
+@pytest.mark.parametrize("stage", ["response_url", "response_kind", "response_json", "consumer"])
+@pytest.mark.parametrize("timing", ["after_open", "during_goto"])
+def test_response_processing_failure_has_safe_error(stage, timing):
+    fake = fake_playwright()
+    response = Mock()
+    type(response).url = PropertyMock(return_value="https://example.test/comments")
+    adapter = Mock()
+    adapter.response_kind.return_value = "comments"
+    response.json.return_value = {"comments": []}
+    consumer = Mock()
+
+    if stage == "response_url":
+        type(response).url = PropertyMock(side_effect=RuntimeError("secret-marker"))
+    elif stage == "response_kind":
+        adapter.response_kind.side_effect = RuntimeError("secret-marker")
+    elif stage == "response_json":
+        response.json.side_effect = RuntimeError("secret-marker")
+    else:
+        consumer.side_effect = RuntimeError("secret-marker")
+
+    if timing == "during_goto":
+        fake.page.goto.side_effect = lambda url: fake.page.on.call_args.args[1](response)
+
+    with pytest.raises(BrowserSessionError) as caught:
+        with BrowserSession(fake.factory) as session:
+            session.open("https://example.test/video", adapter, consumer)
+            if timing == "after_open":
+                fake.page.on.call_args.args[1](response)
+
+    assert_safe_exception(caught.value, BrowserSessionError, "response_processing_failed")
+
+
+@pytest.mark.parametrize("stage", ["response_kind", "consumer"])
+@pytest.mark.parametrize("timing", ["after_open", "during_goto"])
+def test_adapter_shape_failure_has_fixed_category(stage, timing):
+    fake = fake_playwright()
+    response = Mock(url="https://example.test/comments")
+    response.json.return_value = {"comments": []}
+    adapter = Mock()
+    adapter.response_kind.return_value = "comments"
+    consumer = Mock()
+
+    if stage == "response_kind":
+        adapter.response_kind.side_effect = ResponseShapeChanged("secret-marker")
+    else:
+        consumer.side_effect = ResponseShapeChanged("secret-marker")
+
+    if timing == "during_goto":
+        fake.page.goto.side_effect = lambda url: fake.page.on.call_args.args[1](response)
+
+    with pytest.raises(ResponseShapeChanged) as caught:
+        with BrowserSession(fake.factory) as session:
+            session.open("https://example.test/video", adapter, consumer)
+            if timing == "after_open":
+                fake.page.on.call_args.args[1](response)
+
+    assert_safe_exception(caught.value, ResponseShapeChanged, "response_shape_changed")
+
+
 @pytest.mark.parametrize(
     ("stratum", "label"),
     [
@@ -198,3 +266,28 @@ def test_long_tail_advances_scroll_order():
     assert perform_stratum_action(page, "long_tail") == "performed"
     page.mouse.wheel.assert_called_once_with(0, 600)
     page.get_by_role.assert_not_called()
+
+
+@pytest.mark.parametrize("stage", ["get_by_role", "all", "is_visible", "click", "wheel"])
+def test_stratum_action_failure_has_safe_error(stage):
+    page = Mock()
+    control = Mock()
+    control.is_visible.return_value = True
+    page.get_by_role.return_value.all.return_value = [control]
+
+    if stage == "get_by_role":
+        page.get_by_role.side_effect = RuntimeError("secret-marker")
+    elif stage == "all":
+        page.get_by_role.return_value.all.side_effect = RuntimeError("secret-marker")
+    elif stage == "is_visible":
+        control.is_visible.side_effect = RuntimeError("secret-marker")
+    elif stage == "click":
+        control.click.side_effect = RuntimeError("secret-marker")
+    else:
+        page.mouse.wheel.side_effect = RuntimeError("secret-marker")
+
+    stratum = "long_tail" if stage == "wheel" else "recent"
+    with pytest.raises(BrowserSessionError) as caught:
+        perform_stratum_action(page, stratum)
+
+    assert_safe_exception(caught.value, BrowserSessionError, "stratum_action_failed")

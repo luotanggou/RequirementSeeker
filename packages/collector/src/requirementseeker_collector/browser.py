@@ -81,22 +81,31 @@ class BrowserSession:
         consume: Callable[[str, object], None],
     ) -> None:
         def on_response(response: Response) -> None:
-            response_url = response.url
-            if adapter.response_kind(response_url) is None:
-                return
-            decoded = False
-            payload: object = None
+            failed = False
+            shape_changed = False
             try:
-                payload = response.json()
-                decoded = True
+                response_url = response.url
+                try:
+                    response_kind = adapter.response_kind(response_url)
+                except ResponseShapeChanged:
+                    response_kind = None
+                    shape_changed = True
+                if response_kind is not None:
+                    payload = response.json()
+                    try:
+                        consume(response_url, payload)
+                    except ResponseShapeChanged:
+                        shape_changed = True
             except Exception:
-                pass
-            if not decoded:
-                raise BrowserSessionError("response_json_failed")
-            consume(response_url, payload)
+                failed = True
+            if shape_changed:
+                raise ResponseShapeChanged("response_shape_changed")
+            if failed:
+                raise BrowserSessionError("response_processing_failed")
 
         navigated = False
         shape_changed = False
+        response_failed = False
         try:
             if self._response_callback is not None:
                 self.page.remove_listener("response", self._response_callback)
@@ -106,27 +115,42 @@ class BrowserSession:
             navigated = True
         except ResponseShapeChanged:
             shape_changed = True
+        except BrowserSessionError:
+            response_failed = True
         except Exception:
             pass
         if shape_changed:
             raise ResponseShapeChanged("response_shape_changed")
+        if response_failed:
+            raise BrowserSessionError("response_processing_failed")
         if not navigated:
             raise BrowserSessionError("browser_navigation_failed")
 
 
 def perform_stratum_action(page: Page, stratum: Stratum) -> Literal["performed", "unavailable"]:
-    if stratum == "long_tail":
-        page.mouse.wheel(0, 600)
-        return "performed"
-    patterns = {
-        "top": r"^(最热|热门)$",
-        "recent": r"^(最新|按时间)$",
-        "replies": r"^(展开|查看).*回复$",
-    }
-    label = re.compile(patterns[stratum])
-    for role in ("button", "tab", "link"):
-        for control in page.get_by_role(role, name=label).all():
-            if control.is_visible():
-                control.click()
-                return "performed"
-    return "unavailable"
+    failed = False
+    result: Literal["performed", "unavailable"] = "unavailable"
+    try:
+        if stratum == "long_tail":
+            page.mouse.wheel(0, 600)
+            result = "performed"
+        else:
+            patterns = {
+                "top": r"^(最热|热门)$",
+                "recent": r"^(最新|按时间)$",
+                "replies": r"^(展开|查看).*回复$",
+            }
+            label = re.compile(patterns[stratum])
+            for role in ("button", "tab", "link"):
+                for control in page.get_by_role(role, name=label).all():
+                    if control.is_visible():
+                        control.click()
+                        result = "performed"
+                        break
+                if result == "performed":
+                    break
+    except Exception:
+        failed = True
+    if failed:
+        raise BrowserSessionError("stratum_action_failed")
+    return result
