@@ -71,6 +71,54 @@ def test_bilibili_reply_response_uses_requested_parent() -> None:
 
 
 @pytest.mark.parametrize(
+    "cursor",
+    [None, [], {}, {"is_end": 0}, {"is_end": "false"}],
+)
+def test_bilibili_rejects_missing_or_invalid_pagination(cursor: object) -> None:
+    payload: dict[str, Any] = {"code": 0, "data": {"replies": []}}
+    if cursor is not None:
+        payload["data"]["cursor"] = cursor
+
+    with pytest.raises(ResponseShapeChanged):
+        BilibiliAdapter().parse_comment_response(payload, "top", 1, video_author_id="42")
+
+
+@pytest.mark.parametrize("next_cursor", [None, [], 1.5])
+def test_bilibili_requires_usable_next_cursor_when_more_pages_exist(
+    next_cursor: object,
+) -> None:
+    payload = {
+        "code": 0,
+        "data": {"replies": [], "cursor": {"is_end": False, "next": next_cursor}},
+    }
+
+    with pytest.raises(ResponseShapeChanged):
+        BilibiliAdapter().parse_comment_response(payload, "top", 1, video_author_id="42")
+
+
+@pytest.mark.parametrize("author_id", [["not-an-id"], {"id": 42}, 1.5])
+def test_bilibili_non_scalar_author_identifier_is_unavailable(author_id: object) -> None:
+    payload = {
+        "code": 0,
+        "data": {
+            "replies": [
+                {
+                    "rpid": 13,
+                    "member": {"mid": author_id},
+                    "content": {"message": "Artificial comment"},
+                }
+            ],
+            "cursor": {"is_end": True},
+        },
+    }
+
+    page = BilibiliAdapter().parse_comment_response(payload, "top", 1, video_author_id="42")
+
+    assert page.comments[0].raw_author_id is None
+    assert page.comments[0].is_video_author is None
+
+
+@pytest.mark.parametrize(
     ("url", "kind"),
     [
         ("https://api.bilibili.com/x/web-interface/view?bvid=BV1", "video"),

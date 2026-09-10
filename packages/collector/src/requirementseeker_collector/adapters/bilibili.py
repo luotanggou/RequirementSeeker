@@ -119,11 +119,14 @@ class BilibiliAdapter:
                                 item.raw_comment_id,
                             )
                         )
-            cursor_value = data.get("cursor")
-            cursor = mapping(cursor_value) if cursor_value is not None else {}
+            cursor = mapping(required(data, "cursor"))
             is_end = cursor.get("is_end")
-            has_more = not is_end if isinstance(is_end, bool) else False
+            if type(is_end) is not bool:
+                raise ResponseShapeChanged("response_shape_changed")
+            has_more = not is_end
             next_cursor = optional_identifier(cursor.get("next"))
+            if has_more and next_cursor is None:
+                raise ResponseShapeChanged("response_shape_changed")
         except (ResponseShapeChanged, ValidationError, TypeError, ValueError):
             raise ResponseShapeChanged("response_shape_changed") from None
         return ParsedCommentPage(comments, has_more, next_cursor)

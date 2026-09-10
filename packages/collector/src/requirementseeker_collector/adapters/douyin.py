@@ -37,7 +37,7 @@ def _comment(
     parent: str | None = None,
 ) -> RawComment:
     user = mapping(comment.get("user"))
-    author_id = optional_identifier(user.get("sec_uid") or user.get("uid"))
+    author_id = optional_identifier(user.get("sec_uid")) or optional_identifier(user.get("uid"))
     return RawComment(
         raw_comment_id=str(required(comment, "cid")),
         raw_author_id=author_id,
@@ -65,7 +65,9 @@ class DouyinAdapter:
             detail = mapping(payload.get("aweme_detail"))
             author = mapping(detail.get("author"))
             stats = mapping(detail.get("statistics"))
-            author_id = optional_identifier(author.get("sec_uid") or author.get("uid"))
+            author_id = optional_identifier(author.get("sec_uid")) or optional_identifier(
+                author.get("uid")
+            )
             if author_id is None:
                 raise ResponseShapeChanged("response_shape_changed")
             duration_ms = optional_int(detail.get("duration"))
@@ -107,8 +109,12 @@ class DouyinAdapter:
                 for value in sequence(payload.get("comments"))
             ]
             has_more_value = payload.get("has_more")
-            has_more = has_more_value is True or has_more_value == 1
+            if type(has_more_value) is not bool:
+                raise ResponseShapeChanged("response_shape_changed")
+            has_more = has_more_value
             next_cursor = optional_identifier(payload.get("cursor"))
+            if has_more and next_cursor is None:
+                raise ResponseShapeChanged("response_shape_changed")
         except (ResponseShapeChanged, ValidationError, TypeError, ValueError):
             raise ResponseShapeChanged("response_shape_changed") from None
         return ParsedCommentPage(comments, has_more, next_cursor)

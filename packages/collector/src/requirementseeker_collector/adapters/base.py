@@ -64,7 +64,7 @@ def required(source: Mapping[str, Any], key: str) -> object:
 
 
 def optional_identifier(value: object) -> str | None:
-    if value is None or isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
         return None
     identifier = str(value)
     if not identifier or any(character.isspace() for character in identifier):
