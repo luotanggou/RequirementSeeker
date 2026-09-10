@@ -27,6 +27,39 @@ def test_bilibili_parses_video_response() -> None:
     assert parsed.video.duration_seconds == 125
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("bvid", []),
+        ("owner_mid", True),
+        ("title", 1.5),
+        ("desc", {}),
+    ],
+)
+def test_bilibili_rejects_non_scalar_required_video_fields(field: str, value: object) -> None:
+    payload = load_fixture("bilibili/video.json")
+    data = payload["data"]
+    assert isinstance(data, dict)
+    if field == "owner_mid":
+        data["owner"] = {"mid": value}
+    else:
+        data[field] = value
+
+    with pytest.raises(ResponseShapeChanged):
+        BilibiliAdapter().parse_video_response(payload)
+
+
+def test_bilibili_oversized_video_timestamp_is_unavailable() -> None:
+    payload = load_fixture("bilibili/video.json")
+    data = payload["data"]
+    assert isinstance(data, dict)
+    data["pubdate"] = 10**400
+
+    parsed = BilibiliAdapter().parse_video_response(payload)
+
+    assert parsed.video.published_at is None
+
+
 def test_bilibili_parses_top_level_and_reply() -> None:
     page = BilibiliAdapter().parse_comment_response(
         load_fixture("bilibili/comments.json"), "top", 1, video_author_id="42"
@@ -40,6 +73,40 @@ def test_bilibili_parses_top_level_and_reply() -> None:
     assert page.comments[1].is_video_author is False
     assert page.has_more is False
     assert page.next_cursor == "2"
+
+
+@pytest.mark.parametrize("field", ["rpid", "message"])
+@pytest.mark.parametrize("value", [[], {}, True, 1.5])
+def test_bilibili_rejects_non_scalar_required_comment_fields(field: str, value: object) -> None:
+    payload = load_fixture("bilibili/comments.json")
+    data = payload["data"]
+    assert isinstance(data, dict)
+    replies = data["replies"]
+    assert isinstance(replies, list)
+    reply = replies[0]
+    assert isinstance(reply, dict)
+    if field == "message":
+        reply["content"] = {"message": value}
+    else:
+        reply[field] = value
+
+    with pytest.raises(ResponseShapeChanged):
+        BilibiliAdapter().parse_comment_response(payload, "top", 1, video_author_id="42")
+
+
+def test_bilibili_oversized_comment_timestamp_is_unavailable() -> None:
+    payload = load_fixture("bilibili/comments.json")
+    data = payload["data"]
+    assert isinstance(data, dict)
+    replies = data["replies"]
+    assert isinstance(replies, list)
+    reply = replies[0]
+    assert isinstance(reply, dict)
+    reply["ctime"] = 10**400
+
+    page = BilibiliAdapter().parse_comment_response(payload, "top", 1, video_author_id="42")
+
+    assert page.comments[0].published_at is None
 
 
 def test_bilibili_reply_response_uses_requested_parent() -> None:

@@ -18,6 +18,8 @@ from .base import (
     optional_identifier,
     optional_int,
     required,
+    required_identifier,
+    required_text,
     sequence,
     utc_now,
 )
@@ -40,10 +42,10 @@ def _comment(
     content = mapping(reply.get("content"))
     author_id = optional_identifier(member.get("mid"))
     return RawComment(
-        raw_comment_id=str(required(reply, "rpid")),
+        raw_comment_id=required_identifier(reply.get("rpid")),
         raw_author_id=author_id,
         raw_parent_comment_id=parent,
-        text=str(required(content, "message")),
+        text=required_text(content.get("message")),
         published_at=from_unix(reply.get("ctime")),
         collected_at=utc_now(),
         like_count=optional_int(reply.get("like")),
@@ -68,10 +70,10 @@ class BilibiliAdapter:
             stats = mapping(data.get("stat"))
             video = RawVideo(
                 platform="bilibili",
-                raw_video_id=str(required(data, "bvid")),
-                raw_author_id=str(required(owner, "mid")),
-                title=str(required(data, "title")),
-                description=str(required(data, "desc")),
+                raw_video_id=required_identifier(data.get("bvid")),
+                raw_author_id=required_identifier(owner.get("mid")),
+                title=required_text(data.get("title")),
+                description=required_text(data.get("desc")),
                 published_at=from_unix(data.get("pubdate")),
                 duration_seconds=optional_int(data.get("duration")),
                 total_comment_count=optional_int(stats.get("reply")),

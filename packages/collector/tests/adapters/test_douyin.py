@@ -27,6 +27,34 @@ def test_douyin_parses_video_response() -> None:
     assert parsed.video.duration_seconds == 125
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("aweme_id", []),
+        ("desc", 1.5),
+    ],
+)
+def test_douyin_rejects_non_scalar_required_video_fields(field: str, value: object) -> None:
+    payload = load_fixture("douyin/video.json")
+    detail = payload["aweme_detail"]
+    assert isinstance(detail, dict)
+    detail[field] = value
+
+    with pytest.raises(ResponseShapeChanged):
+        DouyinAdapter().parse_video_response(payload)
+
+
+def test_douyin_oversized_video_timestamp_is_unavailable() -> None:
+    payload = load_fixture("douyin/video.json")
+    detail = payload["aweme_detail"]
+    assert isinstance(detail, dict)
+    detail["create_time"] = 10**400
+
+    parsed = DouyinAdapter().parse_video_response(payload)
+
+    assert parsed.video.published_at is None
+
+
 def test_douyin_video_invalid_sec_uid_falls_back_to_valid_uid() -> None:
     payload = load_fixture("douyin/video.json")
     detail = payload["aweme_detail"]
@@ -49,6 +77,33 @@ def test_douyin_parses_nullable_author_and_cursor() -> None:
     assert page.comments[1].is_video_author is True
     assert page.has_more is True
     assert page.next_cursor == "2"
+
+
+@pytest.mark.parametrize("field", ["cid", "text"])
+@pytest.mark.parametrize("value", [[], {}, True, 1.5])
+def test_douyin_rejects_non_scalar_required_comment_fields(field: str, value: object) -> None:
+    payload = load_fixture("douyin/comments.json")
+    comments = payload["comments"]
+    assert isinstance(comments, list)
+    comment = comments[0]
+    assert isinstance(comment, dict)
+    comment[field] = value
+
+    with pytest.raises(ResponseShapeChanged):
+        DouyinAdapter().parse_comment_response(payload, "top", 1, video_author_id="author")
+
+
+def test_douyin_oversized_comment_timestamp_is_unavailable() -> None:
+    payload = load_fixture("douyin/comments.json")
+    comments = payload["comments"]
+    assert isinstance(comments, list)
+    comment = comments[0]
+    assert isinstance(comment, dict)
+    comment["create_time"] = 10**400
+
+    page = DouyinAdapter().parse_comment_response(payload, "top", 1, video_author_id="author")
+
+    assert page.comments[0].published_at is None
 
 
 def test_douyin_reply_response_uses_requested_parent() -> None:

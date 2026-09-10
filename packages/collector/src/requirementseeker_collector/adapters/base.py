@@ -72,6 +72,19 @@ def optional_identifier(value: object) -> str | None:
     return identifier
 
 
+def required_identifier(value: object) -> str:
+    identifier = optional_identifier(value)
+    if identifier is None:
+        raise ResponseShapeChanged("response_shape_changed")
+    return identifier
+
+
+def required_text(value: object) -> str:
+    if not isinstance(value, str):
+        raise ResponseShapeChanged("response_shape_changed")
+    return value
+
+
 def optional_int(value: object) -> int | None:
     if type(value) is not int or value < 0:
         return None
@@ -81,10 +94,10 @@ def optional_int(value: object) -> int | None:
 def from_unix(value: object) -> datetime | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    timestamp = float(value)
-    if not isfinite(timestamp):
-        return None
     try:
+        timestamp = float(value)
+        if not isfinite(timestamp):
+            return None
         return datetime.fromtimestamp(timestamp, UTC)
     except (OverflowError, OSError, ValueError):
         return None

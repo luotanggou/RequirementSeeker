@@ -17,7 +17,8 @@ from .base import (
     mapping,
     optional_identifier,
     optional_int,
-    required,
+    required_identifier,
+    required_text,
     sequence,
     utc_now,
 )
@@ -39,10 +40,10 @@ def _comment(
     user = mapping(comment.get("user"))
     author_id = optional_identifier(user.get("sec_uid")) or optional_identifier(user.get("uid"))
     return RawComment(
-        raw_comment_id=str(required(comment, "cid")),
+        raw_comment_id=required_identifier(comment.get("cid")),
         raw_author_id=author_id,
         raw_parent_comment_id=parent or optional_identifier(comment.get("reply_id")),
-        text=str(required(comment, "text")),
+        text=required_text(comment.get("text")),
         published_at=from_unix(comment.get("create_time")),
         collected_at=utc_now(),
         like_count=optional_int(comment.get("digg_count")),
@@ -65,16 +66,14 @@ class DouyinAdapter:
             detail = mapping(payload.get("aweme_detail"))
             author = mapping(detail.get("author"))
             stats = mapping(detail.get("statistics"))
-            author_id = optional_identifier(author.get("sec_uid")) or optional_identifier(
-                author.get("uid")
+            author_id = required_identifier(
+                optional_identifier(author.get("sec_uid")) or optional_identifier(author.get("uid"))
             )
-            if author_id is None:
-                raise ResponseShapeChanged("response_shape_changed")
             duration_ms = optional_int(detail.get("duration"))
-            description = str(required(detail, "desc"))
+            description = required_text(detail.get("desc"))
             video = RawVideo(
                 platform="douyin",
-                raw_video_id=str(required(detail, "aweme_id")),
+                raw_video_id=required_identifier(detail.get("aweme_id")),
                 raw_author_id=author_id,
                 title=description,
                 description=description,
