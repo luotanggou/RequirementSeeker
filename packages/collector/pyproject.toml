@@ -6,9 +6,13 @@ build-backend = "hatchling.build"
 name = "requirementseeker-collector"
 version = "0.1.0"
 description = "Strict raw collection contracts for RequirementSeeker"
+readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "MIT"
 dependencies = ["pydantic>=2.12,<3", "playwright>=1.55,<2"]
+
+[project.scripts]
+rs-collect = "requirementseeker_collector.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "jsonschema>=4.23,<5", "ruff>=0.11,<1", "mypy>=1.15,<2"]

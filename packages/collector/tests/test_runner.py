@@ -1,0 +1,472 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+import requirementseeker_collector.runner as runner
+from requirementseeker_collector.artifacts import (
+    ArtifactCommitError,
+    read_jsonl,
+    validate_generation,
+)
+from requirementseeker_collector.contracts import (
+    CollectionError,
+    CollectionManifest,
+    ManifestVideo,
+    RawComment,
+    RawVideo,
+)
+from requirementseeker_collector.runner import (
+    BrowserResult,
+    BrowserVideoCollector,
+    PilotRequest,
+    PilotResult,
+    run_batch,
+    run_pilot,
+)
+
+NOW = datetime(2026, 9, 9, 1, tzinfo=UTC)
+
+
+def video(platform: str = "bilibili", video_key: str = "BVfake") -> RawVideo:
+    return RawVideo.model_validate(
+        {
+            "platform": platform,
+            "raw_video_id": video_key,
+            "raw_author_id": "video-author",
+            "title": "synthetic video",
+            "description": "offline fixture",
+            "published_at": None,
+            "duration_seconds": 10,
+            "total_comment_count": 2,
+            "view_count": None,
+            "like_count": None,
+            "favorite_count": None,
+            "share_count": None,
+            "author_follower_count": None,
+            "captured_at": NOW,
+        }
+    )
+
+
+def comment(
+    comment_id: str,
+    *,
+    text: str | None = None,
+    stratum: str = "top",
+    rank: int = 1,
+) -> RawComment:
+    return RawComment.model_validate(
+        {
+            "raw_comment_id": comment_id,
+            "raw_author_id": "comment-author",
+            "raw_parent_comment_id": None,
+            "text": text or f"comment {comment_id}",
+            "published_at": None,
+            "collected_at": NOW,
+            "like_count": None,
+            "reply_count": None,
+            "is_video_author": False,
+            "source_stratum": stratum,
+            "source_page_or_rank": rank,
+        }
+    )
+
+
+def request(platform: str = "bilibili", video_key: str | None = "BVfake") -> PilotRequest:
+    host = "www.bilibili.com" if platform == "bilibili" else "www.douyin.com"
+    return PilotRequest.model_validate(
+        {"platform": platform, "url": f"https://{host}/video/example", "video_key": video_key}
+    )
+
+
+def browser_result(
+    *,
+    platform: str = "bilibili",
+    video_key: str = "BVfake",
+    comments: list[RawComment] | None = None,
+    status: str = "success",
+    errors: list[CollectionError] | None = None,
+) -> BrowserResult:
+    return BrowserResult(
+        video=video(platform, video_key),
+        comments=comments or [comment("c1"), comment("c2", stratum="recent")],
+        pages_requested=2,
+        pages_succeeded=2,
+        sort_modes=["top", "recent"],
+        collection_started_at=NOW,
+        collection_finished_at=NOW,
+        collection_errors=errors or [],
+        status=status,
+    )
+
+
+def manifest_video(platform: str, video_key: str) -> ManifestVideo:
+    host = "www.bilibili.com" if platform == "bilibili" else "www.douyin.com"
+    return ManifestVideo.model_validate(
+        {
+            "platform": platform,
+            "video_key": video_key,
+            "url": f"https://{host}/video/{video_key}",
+            "direction": "software_tools",
+            "comment_scale": "up_to_200",
+        }
+    )
+
+
+def test_pilot_writes_three_valid_files(tmp_path: Path) -> None:
+    result = run_pilot(request(), browser_result(), output_root=tmp_path)
+
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    assert result.status == "success"
+    assert result.target == 2
+    assert sorted(path.name for path in target.iterdir()) == [
+        "collection.json",
+        "comments.jsonl",
+        "video.json",
+    ]
+    _, comments, collection = validate_generation(target)
+    assert [item.raw_comment_id for item in comments] == ["c1", "c2"]
+    assert collection.collected_total == 2
+
+
+def test_pilot_writes_safe_compact_run_report(tmp_path: Path) -> None:
+    result = run_pilot(request(), browser_result(), output_root=tmp_path)
+
+    reports = list((tmp_path / "runs").glob("*/run.json"))
+    assert result.status == "success"
+    assert len(reports) == 1
+    raw = reports[0].read_text(encoding="ascii")
+    assert "comment c1" not in raw
+    assert "https://" not in raw
+    assert "\n" not in raw
+    assert json.loads(raw) == {
+        "collected_total": 2,
+        "collection_finished_at": "2026-09-09T01:00:00+00:00",
+        "collection_started_at": "2026-09-09T01:00:00+00:00",
+        "errors": [],
+        "pages_requested": 2,
+        "pages_succeeded": 2,
+        "platform": "bilibili",
+        "run_version": "1.0",
+        "status": "success",
+        "target": 2,
+        "video_key": "BVfake",
+    }
+
+
+def test_pilot_uses_parsed_video_id_when_key_is_omitted(tmp_path: Path) -> None:
+    result = run_pilot(request(video_key=None), browser_result(), output_root=tmp_path)
+
+    assert result.video_key == "BVfake"
+    validate_generation(tmp_path / "raw" / "bilibili" / "BVfake")
+
+
+def test_pilot_rejects_platform_mismatch_without_writing(tmp_path: Path) -> None:
+    result = run_pilot(request(), browser_result(platform="douyin"), output_root=tmp_path)
+
+    assert result.status == "platform_mismatch"
+    assert not (tmp_path / "raw").exists()
+
+
+@pytest.mark.parametrize(
+    "video_key",
+    [".", "..", "../escape", r"folder\escape", "C:escape", "name.", "CON", "com1.txt"],
+)
+def test_pilot_rejects_unsafe_video_key_without_writing(tmp_path: Path, video_key: str) -> None:
+    result = run_pilot(
+        request(video_key=video_key),
+        browser_result(video_key=video_key),
+        output_root=tmp_path,
+    )
+
+    assert result.status == "invalid_video_key"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_pilot_merges_previous_comments_and_records_identity_conflict(tmp_path: Path) -> None:
+    first = run_pilot(request(), browser_result(), output_root=tmp_path)
+    assert first.status == "success"
+    changed = browser_result(
+        comments=[
+            comment("c1", text="changed identity"),
+            comment("c3", stratum="long_tail"),
+        ]
+    )
+
+    second = run_pilot(request(), changed, output_root=tmp_path)
+
+    assert second.status == "success"
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    _, comments, collection = validate_generation(target)
+    by_id = {item.raw_comment_id: item for item in comments}
+    assert sorted(by_id) == ["c1", "c2", "c3"]
+    assert by_id["c1"].text == "comment c1"
+    conflict = next(
+        error for error in collection.collection_errors if error.category == "merge_conflict"
+    )
+    assert conflict.raw_comment_id == "c1"
+    assert conflict.conflict_fields == ["text"]
+    assert "changed identity" not in conflict.description
+
+
+def test_current_run_conflict_does_not_replace_previous_valid_result(tmp_path: Path) -> None:
+    run_pilot(request(), browser_result(), output_root=tmp_path)
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    before = {path.name: path.read_bytes() for path in target.iterdir()}
+    conflicting = browser_result(comments=[comment("c1", text="one"), comment("c1", text="two")])
+
+    result = run_pilot(request(), conflicting, output_root=tmp_path)
+
+    assert result.status == "current_run_conflict"
+    assert {path.name: path.read_bytes() for path in target.iterdir()} == before
+
+
+def test_fatal_browser_result_does_not_replace_previous_valid_result(tmp_path: Path) -> None:
+    run_pilot(request(), browser_result(), output_root=tmp_path)
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    before = {path.name: path.read_bytes() for path in target.iterdir()}
+
+    result = run_pilot(
+        request(),
+        replace(browser_result(), status="response_shape_changed", comments=[]),
+        output_root=tmp_path,
+    )
+
+    assert result.status == "response_shape_changed"
+    assert {path.name: path.read_bytes() for path in target.iterdir()} == before
+    reports = list((tmp_path / "runs").glob("*/run.json"))
+    assert len(reports) == 2
+    assert {json.loads(path.read_text(encoding="ascii"))["status"] for path in reports} == {
+        "success",
+        "response_shape_changed",
+    }
+
+
+def test_commit_failure_returns_safe_status_and_preserves_previous_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_pilot(request(), browser_result(), output_root=tmp_path)
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    before = {path.name: path.read_bytes() for path in target.iterdir()}
+
+    def fail_commit(*args: object, **kwargs: object) -> None:
+        raise ArtifactCommitError("secret-marker")
+
+    monkeypatch.setattr(runner, "commit_generation", fail_commit)
+    result = run_pilot(request(), browser_result(comments=[comment("c3")]), output_root=tmp_path)
+
+    assert result.status == "artifact_commit_failed"
+    assert "secret-marker" not in str(result.to_summary())
+    assert {path.name: path.read_bytes() for path in target.iterdir()} == before
+
+
+class FakeCollector:
+    def __init__(self, statuses: dict[tuple[str, str], str] | None = None) -> None:
+        self.statuses = statuses or {}
+        self.calls: list[tuple[str, str]] = []
+
+    def collect(self, item: ManifestVideo, output_root: Path) -> PilotResult:
+        del output_root
+        self.calls.append((item.platform, item.video_key))
+        status = self.statuses.get((item.platform, item.video_key), "success")
+        return PilotResult(
+            platform=item.platform,
+            video_key=item.video_key,
+            status=status,
+            target=2,
+            collected_total=2 if status == "success" else 0,
+        )
+
+
+def test_batch_stops_only_failed_platform(tmp_path: Path) -> None:
+    manifest = CollectionManifest(
+        manifest_version="1.0",
+        videos=[
+            manifest_video("bilibili", "BV1"),
+            manifest_video("bilibili", "BV2"),
+            manifest_video("douyin", "DY1"),
+            manifest_video("douyin", "DY2"),
+        ],
+        unavailable_platforms=[],
+    )
+    collector = FakeCollector({("bilibili", "BV1"): "login_failed"})
+
+    result = run_batch(manifest, collector=collector, output_root=tmp_path)
+
+    assert result.platforms["bilibili"].status == "stopped"
+    assert result.platforms["douyin"].videos_succeeded == 2
+    assert collector.calls == [
+        ("bilibili", "BV1"),
+        ("douyin", "DY1"),
+        ("douyin", "DY2"),
+    ]
+    assert [(item.video_key, item.status) for item in result.results] == [
+        ("BV1", "login_failed"),
+        ("BV2", "platform_stopped"),
+        ("DY1", "success"),
+        ("DY2", "success"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "fatal_status",
+    ["login_failed", "challenge_unresolved", "access_restricted", "response_shape_changed"],
+)
+def test_batch_recognizes_exact_fatal_platform_statuses(tmp_path: Path, fatal_status: str) -> None:
+    manifest = CollectionManifest(
+        manifest_version="1.0",
+        videos=[manifest_video("douyin", "DY1"), manifest_video("douyin", "DY2")],
+        unavailable_platforms=[],
+    )
+    collector = FakeCollector({("douyin", "DY1"): fatal_status})
+
+    result = run_batch(manifest, collector=collector, output_root=tmp_path)
+
+    assert [item.status for item in result.results] == [fatal_status, "platform_stopped"]
+
+
+def test_batch_keeps_manifest_order_and_does_not_stop_for_nonfatal_status(
+    tmp_path: Path,
+) -> None:
+    manifest = CollectionManifest(
+        manifest_version="1.0",
+        videos=[
+            manifest_video("douyin", "DY2"),
+            manifest_video("bilibili", "BV1"),
+            manifest_video("douyin", "DY1"),
+        ],
+        unavailable_platforms=[],
+    )
+    collector = FakeCollector({("douyin", "DY2"): "partial"})
+
+    result = run_batch(manifest, collector=collector, output_root=tmp_path)
+
+    assert collector.calls == [("douyin", "DY2"), ("bilibili", "BV1"), ("douyin", "DY1")]
+    assert [item.video_key for item in result.results] == ["DY2", "BV1", "DY1"]
+    assert result.platforms["douyin"].status == "completed"
+
+
+def test_batch_rejects_collector_result_for_another_manifest_item(tmp_path: Path) -> None:
+    manifest = CollectionManifest(
+        manifest_version="1.0",
+        videos=[manifest_video("bilibili", "BV1"), manifest_video("bilibili", "BV2")],
+        unavailable_platforms=[],
+    )
+
+    class MismatchedCollector:
+        def collect(self, item: ManifestVideo, output_root: Path) -> PilotResult:
+            del item, output_root
+            return PilotResult("douyin", "wrong", "success", 2, 2)
+
+    result = run_batch(manifest, collector=MismatchedCollector(), output_root=tmp_path)
+
+    assert [(item.platform, item.video_key, item.status) for item in result.results] == [
+        ("bilibili", "BV1", "response_shape_changed"),
+        ("bilibili", "BV2", "platform_stopped"),
+    ]
+
+
+def test_batch_rejects_casefolded_duplicate_output_paths_before_collecting(
+    tmp_path: Path,
+) -> None:
+    manifest = CollectionManifest(
+        manifest_version="1.0",
+        videos=[manifest_video("bilibili", "BVsame"), manifest_video("bilibili", "bvsame")],
+        unavailable_platforms=[],
+    )
+    collector = FakeCollector()
+
+    result = run_batch(manifest, collector=collector, output_root=tmp_path)
+
+    assert collector.calls == []
+    assert [item.status for item in result.results] == [
+        "invalid_manifest_path",
+        "invalid_manifest_path",
+    ]
+
+
+def test_batch_does_not_report_an_empty_manifest_as_success(tmp_path: Path) -> None:
+    manifest = CollectionManifest(manifest_version="1.0", videos=[], unavailable_platforms=[])
+    collector = FakeCollector()
+
+    result = run_batch(manifest, collector=collector, output_root=tmp_path)
+
+    assert collector.calls == []
+    assert result.status == "invalid_manifest"
+    assert result.results == []
+
+
+def test_live_collector_buffers_supported_comments_that_arrive_before_video_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixtures = Path(__file__).parent / "fixtures" / "bilibili"
+    video_payload = json.loads((fixtures / "video.json").read_text(encoding="utf-8"))
+    comments_payload = json.loads((fixtures / "comments.json").read_text(encoding="utf-8"))
+
+    class FakePage:
+        def wait_for_timeout(self, milliseconds: float) -> None:
+            del milliseconds
+
+    class FakeSession:
+        page = FakePage()
+
+        def __enter__(self) -> FakeSession:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def open(self, url: str, adapter: object, consume: object) -> None:
+            del url, adapter
+            callback = cast(Callable[[str, object], None], consume)
+            callback(
+                "https://api.bilibili.com/x/v2/reply/wbi/main",
+                comments_payload,
+            )
+            callback("https://api.bilibili.com/x/web-interface/view", video_payload)
+
+    monkeypatch.setattr(runner, "BrowserSession", FakeSession)
+    monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
+
+    result = BrowserVideoCollector()._browse(
+        PilotRequest(
+            platform="bilibili",
+            url="https://www.bilibili.com/video/BV1synthetic",
+            video_key="BV1synthetic",
+        )
+    )
+
+    assert result.status == "success"
+    assert result.video is not None
+    assert [item.raw_comment_id for item in result.comments] == ["11", "12"]
+    assert result.pages_requested == result.pages_succeeded == 1
+
+
+def test_live_manifest_collection_revalidates_the_public_url_as_text(tmp_path: Path) -> None:
+    seen: list[PilotRequest] = []
+
+    class RecordingCollector(BrowserVideoCollector):
+        def collect_pilot(self, request: PilotRequest, output_root: Path) -> PilotResult:
+            del output_root
+            seen.append(request)
+            return PilotResult(request.platform, request.video_key or "unknown", "success", 0, 0)
+
+    item = manifest_video("bilibili", "BV1")
+    result = RecordingCollector().collect(item, tmp_path)
+
+    assert result.status == "success"
+    assert seen[0].url.host == "www.bilibili.com"
+
+
+def test_successful_pilot_comments_remain_strict_jsonl(tmp_path: Path) -> None:
+    run_pilot(request(), browser_result(), output_root=tmp_path)
+
+    loaded = read_jsonl(tmp_path / "raw" / "bilibili" / "BVfake" / "comments.jsonl", RawComment)
+    assert len(loaded) == 2
