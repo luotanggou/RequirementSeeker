@@ -28,6 +28,20 @@ The response parser recognizes only these six current response families:
 - Douyin `/aweme/v1/web/comment/list`
 - Douyin `/aweme/v1/web/comment/list/reply`
 
+Run the offline Playwright gate against the checked-in synthetic loopback page:
+
+```sh
+uv run --project packages/collector playwright install chromium
+uv run --project packages/collector pytest \
+  packages/collector/tests/integration/test_playwright_collection.py -q
+```
+
+This gate launches an ephemeral Chromium context (headless only for the test), registers the
+response listener before navigation, reads video metadata and page state from the DOM, and
+parses comments only from an artificial JSON response. It rejects non-loopback page URLs and
+does not contact Bilibili or Douyin. The production `pilot` flow remains visibly headed and
+supervised.
+
 Run one visible pilot:
 
 ```sh

@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+import socket
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
+
+from requirementseeker_collector import runner
+from requirementseeker_collector.adapters import BilibiliAdapter, ResponseShapeChanged
+from requirementseeker_collector.artifacts import validate_generation
+
+
+@dataclass
+class LocalSite:
+    url: str
+    server: ThreadingHTTPServer
+    thread: threading.Thread
+    comment_requests: list[str]
+
+
+@contextmanager
+def serve_site(mode: str = "supported") -> Iterator[LocalSite]:
+    page = (Path(__file__).parent / "site" / "index.html").read_bytes()
+    comment_payload = (
+        Path(__file__).parents[1] / "fixtures" / "bilibili" / "comments.json"
+    ).read_bytes()
+    comment_requests: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parsed = urlsplit(self.path)
+            if parsed.path in {"/", "/index.html"}:
+                body = page
+                content_type = "text/html; charset=utf-8"
+            elif parsed.path == "/x/v2/reply/wbi/main":
+                shape = parse_qs(parsed.query).get("shape", [""])[0]
+                comment_requests.append(shape)
+                body = comment_payload if shape == "supported" else b'{"code":0,"unknown":[]}'
+                content_type = "application/json"
+            else:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    site = LocalSite(
+        f"http://{host}:{port}/index.html?mode={mode}", server, thread, comment_requests
+    )
+    try:
+        yield site
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.fixture
+def local_site() -> Iterator[LocalSite]:
+    with serve_site() as site:
+        yield site
+
+
+@pytest.fixture
+def local_site_without_recent() -> Iterator[LocalSite]:
+    with serve_site("without-recent") as site:
+        yield site
+
+
+@pytest.fixture
+def local_unknown_site() -> Iterator[LocalSite]:
+    with serve_site("unknown") as site:
+        yield site
+
+
+def test_page_flow_collects_response_and_dom_metadata(
+    local_site: LocalSite, tmp_path: Path
+) -> None:
+    result = runner.collect_from_page(
+        local_site.url, BilibiliAdapter(), output_root=tmp_path, headless=True
+    )
+
+    assert result.video.title == "Synthetic Video"
+    assert result.video.description == "Synthetic integration page"
+    assert [item.raw_comment_id for item in result.comments] == ["11", "12"]
+    assert result.collection.pages_requested == 1
+    assert result.collection.pages_succeeded == 1
+    assert local_site.comment_requests == ["supported"]
+    assert validate_generation(tmp_path / "raw" / "bilibili" / "BV1synthetic")[0] == result.video
+
+
+def test_page_flow_records_unavailable_sort_and_keeps_actual_order(
+    local_site_without_recent: LocalSite, tmp_path: Path
+) -> None:
+    result = runner.collect_from_page(
+        local_site_without_recent.url,
+        BilibiliAdapter(),
+        output_root=tmp_path,
+        headless=True,
+    )
+
+    assert "recent" not in result.collection.sort_modes
+    assert result.collection.sort_modes == ["top"]
+    assert any(
+        error.category == "stratum_unavailable" for error in result.collection.collection_errors
+    )
+
+
+def test_unknown_response_shape_stops_without_commit(
+    local_unknown_site: LocalSite, tmp_path: Path
+) -> None:
+    with pytest.raises(ResponseShapeChanged, match="^response_shape_changed$"):
+        runner.collect_from_page(
+            local_unknown_site.url,
+            BilibiliAdapter(),
+            output_root=tmp_path,
+            headless=True,
+        )
+
+    assert not (tmp_path / "raw").exists()
+
+
+def test_response_started_during_navigation_is_not_lost(tmp_path: Path) -> None:
+    with serve_site("early") as site:
+        result = runner.collect_from_page(
+            site.url, BilibiliAdapter(), output_root=tmp_path, headless=True
+        )
+
+    assert [item.raw_comment_id for item in result.comments] == ["11", "12"]
+    assert result.collection.pages_requested == result.collection.pages_succeeded == 1
+
+
+def test_end_marker_stops_without_an_extra_response(tmp_path: Path) -> None:
+    with serve_site("end-empty") as site:
+        result = runner.collect_from_page(
+            site.url, BilibiliAdapter(), output_root=tmp_path, headless=True
+        )
+
+    assert result.comments == []
+    assert result.collection.pages_requested == result.collection.pages_succeeded == 0
+    assert site.comment_requests == []
+
+
+def test_page_timeout_does_not_commit_partial_artifacts(tmp_path: Path) -> None:
+    with serve_site("stalled") as site:
+        with pytest.raises(runner.BrowserSessionError, match="^page_collection_timeout$"):
+            runner.collect_from_page(
+                site.url, BilibiliAdapter(), output_root=tmp_path, headless=True
+            )
+
+    assert not (tmp_path / "raw").exists()
+
+
+def test_page_driver_rejects_non_loopback_url_before_navigation(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="^local_page_required$"):
+        runner.collect_from_page(
+            "http://example.com/index.html",
+            BilibiliAdapter(),
+            output_root=tmp_path,
+            headless=True,
+        )
+
+    assert not (tmp_path / "raw").exists()
+
+
+def test_local_server_is_reliably_closed() -> None:
+    with serve_site() as site:
+        host, port = site.server.server_address[:2]
+
+    with socket.socket() as connection:
+        connection.settimeout(0.2)
+        assert connection.connect_ex((host, port)) != 0

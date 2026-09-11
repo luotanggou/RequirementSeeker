@@ -13,8 +13,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Literal, Protocol, Self, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
+from playwright.sync_api import Page, Response, sync_playwright
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from .adapters import BilibiliAdapter, DouyinAdapter, PlatformAdapter, ResponseShapeChanged
@@ -113,6 +115,15 @@ class BrowserResult:
     collection_errors: list[CollectionError] = field(default_factory=list)
     status: str = "success"
     run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PageCollectionResult:
+    """Validated artifacts produced by the local Playwright integration driver."""
+
+    video: RawVideo
+    comments: list[RawComment]
+    collection: CollectionRecord
 
 
 @dataclass(frozen=True)
@@ -799,6 +810,193 @@ class CliSupervisionGate:
         return (
             cast(SupervisionStatus, answer) if answer in _SUPERVISION_STATUSES else "login_failed"
         )
+
+
+def _local_page_platform(adapter: PlatformAdapter) -> Platform:
+    if isinstance(adapter, BilibiliAdapter):
+        return "bilibili"
+    if isinstance(adapter, DouyinAdapter):
+        return "douyin"
+    raise ValueError("unsupported_adapter")
+
+
+def _local_adapter_url(adapter: PlatformAdapter, response_url: str) -> str:
+    path = urlsplit(response_url).path
+    host = "api.bilibili.com" if isinstance(adapter, BilibiliAdapter) else "www.douyin.com"
+    return f"https://{host}{path}"
+
+
+def _meta_content(page: Page, name: str) -> str:
+    value = page.locator(f'meta[name="{name}"]').get_attribute("content")
+    if value is None:
+        raise ResponseShapeChanged("response_shape_changed")
+    return value
+
+
+def _video_from_local_page(page: Page, platform: Platform) -> RawVideo:
+    try:
+        reported = _meta_content(page, "rs-total-comment-count")
+        if not reported.isdecimal():
+            raise ResponseShapeChanged("response_shape_changed")
+        return RawVideo(
+            platform=platform,
+            raw_video_id=_meta_content(page, "rs-video-id"),
+            raw_author_id=_meta_content(page, "rs-author-id"),
+            title=_meta_content(page, "rs-title"),
+            description=_meta_content(page, "rs-description"),
+            published_at=None,
+            duration_seconds=None,
+            total_comment_count=int(reported),
+            view_count=None,
+            like_count=None,
+            favorite_count=None,
+            share_count=None,
+            author_follower_count=None,
+            captured_at=datetime.now(UTC),
+        )
+    except (ResponseShapeChanged, ValidationError, ValueError):
+        raise ResponseShapeChanged("response_shape_changed") from None
+
+
+def collect_from_page(
+    local_url: str,
+    adapter: PlatformAdapter,
+    output_root: Path,
+    headless: bool = True,
+) -> PageCollectionResult:
+    """Exercise collection against one checked-in loopback page and commit on success."""
+
+    try:
+        parsed_url = urlsplit(local_url)
+    except ValueError:
+        raise ValueError("local_page_required") from None
+    if (
+        parsed_url.scheme != "http"
+        or parsed_url.hostname not in {"127.0.0.1", "::1"}
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+    ):
+        raise ValueError("local_page_required")
+
+    platform = _local_page_platform(adapter)
+    started = datetime.now(UTC)
+    video: RawVideo | None = None
+    comments: list[RawComment] = []
+    pages_requested = 0
+    pages_succeeded = 0
+    active_stratum: Stratum = "top"
+    sort_modes: list[str] = []
+    collection_errors: list[CollectionError] = []
+    response_shape_changed = False
+    pending_responses: list[tuple[Mapping[str, object], Stratum]] = []
+
+    def parse_comment_payload(payload: Mapping[str, object], stratum: Stratum) -> None:
+        nonlocal pages_succeeded
+        if video is None:
+            pending_responses.append((payload, stratum))
+            return
+        parsed = adapter.parse_comment_response(
+            payload,
+            stratum,
+            pages_succeeded + 1,
+            video_author_id=video.raw_author_id,
+        )
+        comments.extend(parsed.comments)
+        pages_succeeded += 1
+
+    def consume_response(response: Response) -> None:
+        nonlocal pages_requested, response_shape_changed
+        try:
+            if not 200 <= response.status < 300:
+                return
+            normalized_url = _local_adapter_url(adapter, response.url)
+            kind = adapter.response_kind(normalized_url)
+            if kind not in {"comments", "replies"}:
+                return
+            pages_requested += 1
+            payload = response.json()
+            if not isinstance(payload, Mapping):
+                raise ResponseShapeChanged("response_shape_changed")
+            parse_comment_payload(payload, active_stratum)
+        except Exception:
+            response_shape_changed = True
+
+    try:
+        with sync_playwright() as runtime:
+            browser = runtime.chromium.launch(headless=headless)
+            context = browser.new_context()
+            try:
+                page = context.new_page()
+                page.on("response", consume_response)
+                page.goto(local_url)
+                video = _video_from_local_page(page, platform)
+                page.wait_for_load_state("networkidle")
+                while pending_responses:
+                    payload, stratum = pending_responses.pop(0)
+                    parse_comment_payload(payload, stratum)
+                unavailable_at = datetime.now(UTC)
+                for stratum in cast(tuple[Stratum, ...], ("top", "recent", "replies")):
+                    control = page.locator(f'[data-rs-stratum="{stratum}"]')
+                    if control.count() == 0 or not control.first.is_visible():
+                        collection_errors.append(
+                            _collection_error("stratum_unavailable", unavailable_at)
+                        )
+
+                top_control = page.locator('[data-rs-stratum="top"]')
+                if top_control.count() > 0 and top_control.first.is_visible():
+                    top_control.first.click()
+                    sort_modes.append("top")
+
+                target = collection_target(video.total_comment_count).target
+                scrolls = 0
+                while len(comments) < target:
+                    end_marker = page.locator('[data-rs-end="true"]')
+                    if end_marker.count() > 0 and end_marker.first.is_visible():
+                        break
+                    page.mouse.wheel(0, 900)
+                    page.wait_for_timeout(250)
+                    scrolls += 1
+                    if response_shape_changed:
+                        raise ResponseShapeChanged("response_shape_changed")
+                    if scrolls >= 20:
+                        raise BrowserSessionError("page_collection_timeout")
+            finally:
+                context.close()
+                browser.close()
+    except ResponseShapeChanged:
+        raise ResponseShapeChanged("response_shape_changed") from None
+    except BrowserSessionError:
+        raise
+    except Exception:
+        raise BrowserSessionError("page_collection_failed") from None
+
+    assert video is not None
+    finished = datetime.now(UTC)
+    collection = CollectionRecord(
+        reported_total=video.total_comment_count,
+        collected_total=len(comments),
+        pages_requested=pages_requested,
+        pages_succeeded=pages_succeeded,
+        sort_modes=sort_modes,
+        collection_started_at=started,
+        collection_finished_at=finished,
+        collection_errors=collection_errors,
+    )
+    run_id = uuid4().hex
+    paths = CommitPaths(
+        staging=output_root / ".staging" / run_id / platform / video.raw_video_id,
+        target=output_root / "raw" / platform / video.raw_video_id,
+        backup=output_root / ".backup" / run_id / platform / video.raw_video_id,
+    )
+    if not _paths_are_safe_under(output_root, paths.staging, paths.target, paths.backup):
+        raise ArtifactCommitError("artifact_paths_invalid")
+    try:
+        write_generation(paths.staging, video, comments, collection)
+        commit_generation(paths)
+        validate_generation(paths.target)
+    except (ArtifactCommitError, ArtifactValidationError):
+        raise ArtifactCommitError("artifact_commit_failed") from None
+    return PageCollectionResult(video, comments, collection)
 
 
 class BrowserVideoCollector:
