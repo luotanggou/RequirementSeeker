@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event
+from time import monotonic
 from typing import cast
 
 import pytest
@@ -15,6 +18,7 @@ from requirementseeker_collector.artifacts import (
     read_jsonl,
     validate_generation,
 )
+from requirementseeker_collector.challenges import ChallengeResult, ClickAction
 from requirementseeker_collector.contracts import (
     CollectionError,
     CollectionManifest,
@@ -25,6 +29,7 @@ from requirementseeker_collector.contracts import (
 from requirementseeker_collector.runner import (
     BrowserResult,
     BrowserVideoCollector,
+    CliSupervisionGate,
     PilotRequest,
     PilotResult,
     run_batch,
@@ -161,6 +166,37 @@ def test_pilot_writes_safe_compact_run_report(tmp_path: Path) -> None:
     }
 
 
+@pytest.mark.parametrize("unsafe_run_id", ["../escape-run-id", "", " "])
+def test_pilot_replaces_an_untrusted_browser_run_id_with_a_safe_local_id(
+    tmp_path: Path, unsafe_run_id: str
+) -> None:
+    output_root = tmp_path / "root"
+    unsafe = replace(browser_result(), run_id=unsafe_run_id)
+
+    result = run_pilot(request(), unsafe, output_root=output_root)
+
+    assert result.status == "success"
+    assert not (output_root / "escape-run-id").exists()
+    assert len(list((output_root / "runs").glob("*/run.json"))) == 1
+
+
+def test_run_report_maps_unknown_error_categories_to_a_safe_fixed_value(
+    tmp_path: Path,
+) -> None:
+    unsafe_error = CollectionError(
+        category="password-secret-marker",
+        occurred_at=NOW,
+        stage="runner",
+        description="token-secret-marker",
+    )
+
+    run_pilot(request(), browser_result(errors=[unsafe_error]), output_root=tmp_path)
+
+    report = next((tmp_path / "runs").glob("*/run.json")).read_text(encoding="ascii")
+    assert "secret-marker" not in report
+    assert json.loads(report)["errors"] == ["collection_error"]
+
+
 def test_pilot_uses_parsed_video_id_when_key_is_omitted(tmp_path: Path) -> None:
     result = run_pilot(request(video_key=None), browser_result(), output_root=tmp_path)
 
@@ -214,6 +250,81 @@ def test_pilot_merges_previous_comments_and_records_identity_conflict(tmp_path: 
     assert conflict.raw_comment_id == "c1"
     assert conflict.conflict_fields == ["text"]
     assert "changed identity" not in conflict.description
+
+
+def test_pilot_recovers_unique_valid_backup_before_merging_current_comments(
+    tmp_path: Path,
+) -> None:
+    first = run_pilot(request(), browser_result(), output_root=tmp_path)
+    assert first.status == "success"
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    backup = tmp_path / ".backup" / "interrupted" / "bilibili" / "BVfake"
+    backup.parent.mkdir(parents=True)
+    target.replace(backup)
+
+    result = run_pilot(request(), browser_result(comments=[comment("c3")]), output_root=tmp_path)
+
+    assert result.status == "partial"
+    _, comments, collection = validate_generation(target)
+    assert [item.raw_comment_id for item in comments] == ["c1", "c2", "c3"]
+    assert any(
+        error.category == "interrupted_commit_recovered" for error in collection.collection_errors
+    )
+    assert not backup.exists()
+
+
+def test_pilot_does_not_restore_a_backup_over_an_existing_target(tmp_path: Path) -> None:
+    run_pilot(request(), browser_result(), output_root=tmp_path)
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    backup = tmp_path / ".backup" / "stale" / "bilibili" / "BVfake"
+    backup.parent.mkdir(parents=True)
+    backup.mkdir()
+    (backup / "marker").write_text("must remain unused", encoding="utf-8")
+
+    result = run_pilot(request(), browser_result(), output_root=tmp_path)
+
+    assert result.status == "success"
+    assert (backup / "marker").read_text(encoding="utf-8") == "must remain unused"
+    validate_generation(target)
+
+
+def test_pilot_fails_closed_when_multiple_backup_candidates_exist(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    run_pilot(request(), browser_result(), output_root=source_root)
+    source = source_root / "raw" / "bilibili" / "BVfake"
+    for run_id in ("one", "two"):
+        candidate = tmp_path / ".backup" / run_id / "bilibili" / "BVfake"
+        candidate.parent.mkdir(parents=True)
+        shutil.copytree(source, candidate)
+    collector_input = browser_result(comments=[comment("c3")])
+
+    result = run_pilot(request(), collector_input, output_root=tmp_path)
+
+    assert result.status == "backup_recovery_failed"
+    assert not (tmp_path / "raw" / "bilibili" / "BVfake").exists()
+
+
+@pytest.mark.parametrize("candidate_kind", ["invalid", "symlink"])
+def test_pilot_fails_closed_for_invalid_or_symbolic_backup_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_kind: str,
+) -> None:
+    candidate = tmp_path / ".backup" / "interrupted" / "bilibili" / "BVfake"
+    candidate.mkdir(parents=True)
+    (candidate / "marker").write_text("not a valid generation", encoding="utf-8")
+    if candidate_kind == "symlink":
+        original_is_symlink = Path.is_symlink
+
+        def fake_is_symlink(path: Path) -> bool:
+            return path == candidate or original_is_symlink(path)
+
+        monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+
+    result = run_pilot(request(), browser_result(), output_root=tmp_path)
+
+    assert result.status == "backup_recovery_failed"
+    assert not (tmp_path / "raw" / "bilibili" / "BVfake").exists()
 
 
 def test_current_run_conflict_does_not_replace_previous_valid_result(tmp_path: Path) -> None:
@@ -435,7 +546,7 @@ def test_live_collector_buffers_supported_comments_that_arrive_before_video_meta
     monkeypatch.setattr(runner, "BrowserSession", FakeSession)
     monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
 
-    result = BrowserVideoCollector()._browse(
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
         PilotRequest(
             platform="bilibili",
             url="https://www.bilibili.com/video/BV1synthetic",
@@ -463,6 +574,180 @@ def test_live_manifest_collection_revalidates_the_public_url_as_text(tmp_path: P
 
     assert result.status == "success"
     assert seen[0].url.host == "www.bilibili.com"
+
+
+@pytest.mark.parametrize(
+    ("browser_error", "expected_status"),
+    [
+        ("response_processing_failed", "response_shape_changed"),
+        ("browser_start_failed", "collection_failed"),
+        ("browser_navigation_failed", "collection_failed"),
+        ("browser_cleanup_failed", "collection_failed"),
+        ("stratum_action_failed", "collection_failed"),
+    ],
+)
+def test_live_collector_does_not_invent_access_restriction_from_local_browser_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    browser_error: str,
+    expected_status: str,
+) -> None:
+    class FailingSession:
+        def __enter__(self) -> FailingSession:
+            raise runner.BrowserSessionError(browser_error)
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    monkeypatch.setattr(runner, "BrowserSession", FailingSession)
+
+    result = BrowserVideoCollector()._browse(request())
+
+    assert result.status == expected_status
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["ready", "login_failed", "challenge_unresolved", "access_restricted"],
+)
+def test_cli_supervision_gate_returns_only_explicit_fixed_statuses(reply: str) -> None:
+    prompts: list[str] = []
+    gate = CliSupervisionGate(read_line=lambda: reply, write_prompt=prompts.append)
+
+    assert gate.wait_for_ready(object(), timeout_seconds=0.1) == reply
+    assert len(prompts) == 1
+    assert "https://" not in prompts[0]
+
+
+def test_cli_supervision_gate_has_a_finite_timeout() -> None:
+    blocked = Event()
+    gate = CliSupervisionGate(
+        read_line=lambda: blocked.wait() or "ready", write_prompt=lambda _: None
+    )
+    started = monotonic()
+
+    status = gate.wait_for_ready(object(), timeout_seconds=0.01)
+
+    assert status == "login_failed"
+    assert monotonic() - started < 0.5
+    blocked.set()
+
+
+class SequenceSupervisor:
+    def __init__(self, *statuses: str) -> None:
+        self.statuses = list(statuses)
+        self.calls = 0
+
+    def wait_for_ready(self, page: object, timeout_seconds: float) -> str:
+        del page
+        assert timeout_seconds > 0
+        self.calls += 1
+        return self.statuses.pop(0)
+
+
+class SupervisedFakeSession:
+    def __init__(self, video_payload: object) -> None:
+        class FakePage:
+            def wait_for_timeout(self, milliseconds: float) -> None:
+                del milliseconds
+
+        self.page = FakePage()
+        self.video_payload = video_payload
+
+    def __enter__(self) -> SupervisedFakeSession:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        del args
+
+    def open(self, url: str, adapter: object, consume: object) -> None:
+        del url, adapter
+        callback = cast(Callable[[str, object], None], consume)
+        callback("https://api.bilibili.com/x/web-interface/view", self.video_payload)
+
+
+@pytest.mark.parametrize(
+    "fatal_status", ["login_failed", "challenge_unresolved", "access_restricted"]
+)
+def test_supervision_fatal_status_stops_before_stratum_actions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fatal_status: str,
+) -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures/bilibili/video.json").read_text(encoding="utf-8")
+    )
+    actions: list[str] = []
+    monkeypatch.setattr(runner, "BrowserSession", lambda: SupervisedFakeSession(payload))
+    monkeypatch.setattr(
+        runner,
+        "perform_stratum_action",
+        lambda page, stratum: actions.append(stratum) or "performed",
+    )
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor(fatal_status))._browse(
+        request(), tmp_path
+    )
+
+    assert result.status == fatal_status
+    assert actions == []
+
+
+def test_supervision_ready_allows_supported_stratum_actions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures/bilibili/video.json").read_text(encoding="utf-8")
+    )
+    actions: list[str] = []
+    monkeypatch.setattr(runner, "BrowserSession", lambda: SupervisedFakeSession(payload))
+    monkeypatch.setattr(
+        runner,
+        "perform_stratum_action",
+        lambda page, stratum: actions.append(stratum) or "performed",
+    )
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        request(), tmp_path
+    )
+
+    assert result.status == "partial"
+    assert actions == ["top", "recent", "replies", "long_tail"]
+
+
+def test_explicit_challenge_action_uses_one_handler_attempt_and_rechecks_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures/bilibili/video.json").read_text(encoding="utf-8")
+    )
+    action = ClickAction((10, 20))
+    attempts: list[tuple[Path, object, object]] = []
+
+    class FakeChallengeHandler:
+        def __init__(self, directory: Path, *, confirm: Callable[[], bool]) -> None:
+            assert confirm() is True
+            self.directory = directory
+
+        def attempt(self, page: object, received_action: object) -> ChallengeResult:
+            attempts.append((self.directory, page, received_action))
+            return ChallengeResult("attempted")
+
+    supervisor = SequenceSupervisor("ready", "ready")
+    monkeypatch.setattr(runner, "BrowserSession", lambda: SupervisedFakeSession(payload))
+    monkeypatch.setattr(runner, "ChallengeHandler", FakeChallengeHandler)
+    monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
+
+    result = BrowserVideoCollector(
+        supervisor=supervisor,
+        challenge_action=action,
+        challenge_id="challenge-1",
+    )._browse(request(), tmp_path, run_id="../escape-run")
+
+    assert result.status == "partial"
+    assert supervisor.calls == 2
+    assert len(attempts) == 1
+    assert attempts[0][0].resolve().is_relative_to((tmp_path / "challenges").resolve())
+    assert attempts[0][2] is action
 
 
 def test_successful_pilot_comments_remain_strict_jsonl(tmp_path: Path) -> None:

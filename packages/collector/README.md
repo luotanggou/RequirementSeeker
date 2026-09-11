@@ -6,9 +6,16 @@ collector does not persist the browser context, cookies, tokens, headers, passwo
 storage state.
 
 All raw artifacts, temporary generations, challenge evidence, and run data stay local under
-`.local-data/m2-real` by default. A supervised challenge attempt requires live confirmation,
-is limited to one visible mouse action, and may save masked page screenshots plus a safe action
-record. It does not capture keyboard input or use third-party CAPTCHA services.
+the current workspace's `.local-data/m2-real` boundary. The CLI rejects output roots outside
+that directory.
+
+After navigation, the CLI waits at most 120 seconds for the operator to report a fixed status.
+By default, login and challenge handling are manual takeovers in the visible page; the collector
+does not guess selectors or coordinates. An API caller may explicitly provide one click or drag
+action. Only then does the collector invoke the supervised challenge handler once, save masked
+page screenshots plus a safe action record, and ask the operator to confirm the resulting page
+state. It does not capture browser keyboard events, repeat the action automatically, or use
+third-party CAPTCHA services.
 
 The response parser recognizes only these six current response families:
 

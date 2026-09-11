@@ -75,8 +75,11 @@ def test_cli_rejects_source_url_credentials_without_echo(
 
 
 def test_pilot_uses_default_local_output_root_and_emits_compact_summary(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     fake = FakeLiveCollector()
     monkeypatch.setattr(cli, "BrowserVideoCollector", lambda: fake)
 
@@ -95,7 +98,7 @@ def test_pilot_uses_default_local_output_root_and_emits_compact_summary(
     stderr, summary = output(capsys)
     assert exit_code == 0
     assert stderr == ""
-    assert fake.pilot_calls[0][1] == Path(".local-data/m2-real")
+    assert fake.pilot_calls[0][1] == (tmp_path / ".local-data/m2-real").resolve()
     assert summary == {
         "collected_total": 2,
         "platform": "bilibili",
@@ -192,6 +195,7 @@ def test_batch_processes_manifest_in_file_order_and_emits_platform_summary(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     path = tmp_path / "manifest.json"
     write_manifest(
         path,
@@ -204,7 +208,8 @@ def test_batch_processes_manifest_in_file_order_and_emits_platform_summary(
     fake = FakeLiveCollector()
     monkeypatch.setattr(cli, "BrowserVideoCollector", lambda: fake)
 
-    assert main(["batch", str(path), "--output-root", str(tmp_path / "out")]) == 0
+    output_root = tmp_path / ".local-data/m2-real/batch-one"
+    assert main(["batch", str(path), "--output-root", str(output_root)]) == 0
 
     stderr, summary = output(capsys)
     assert stderr == ""
@@ -219,6 +224,63 @@ def test_batch_processes_manifest_in_file_order_and_emits_platform_summary(
         "bilibili": {"status": "completed", "videos_succeeded": 1},
         "douyin": {"status": "completed", "videos_succeeded": 2},
     }
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        ".",
+        "..",
+        ".local-data",
+        ".local-data/m2-real/../../escape",
+        ".local-data/m2-real/CON",
+        ".local-data/m2-real/name.",
+        ".local-data/m2-real/child:stream",
+        "\\\\server\\share\\output",
+        "\\\\?\\C:\\output",
+        "\\\\.\\C:\\output",
+    ],
+)
+def test_output_root_rejects_paths_outside_the_local_data_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unsafe: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert cli._output_root(unsafe) is None
+
+
+def test_output_root_returns_a_canonical_boundary_or_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    boundary = tmp_path / ".local-data/m2-real"
+
+    assert cli._output_root(".local-data/m2-real") == boundary.resolve()
+    assert cli._output_root(".local-data/m2-real/./nested") == (boundary / "nested").resolve()
+
+
+def test_output_root_rejects_a_symbolic_link_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    boundary = tmp_path / ".local-data/m2-real"
+    boundary.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = boundary / "escape"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        original_resolve = Path.resolve
+
+        def resolve_escape(path: Path, strict: bool = False) -> Path:
+            if path == Path(".local-data/m2-real/escape") or path == link:
+                return outside.resolve()
+            return original_resolve(path, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", resolve_escape)
+
+    assert cli._output_root(".local-data/m2-real/escape") is None
 
 
 def test_cli_rejects_empty_output_root(

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+import sys
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol, Self, cast
+from queue import Empty, Queue
+from threading import Thread
+from typing import Literal, Protocol, Self, cast
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
@@ -18,10 +21,12 @@ from .artifacts import (
     ArtifactValidationError,
     CommitPaths,
     commit_generation,
+    recover_interrupted_commit,
     validate_generation,
     write_generation,
 )
 from .browser import BrowserSession, BrowserSessionError, perform_stratum_action
+from .challenges import ChallengeHandler, ClickAction, DragAction
 from .contracts import (
     CollectionError,
     CollectionManifest,
@@ -50,6 +55,22 @@ _WINDOWS_DEVICE_NAMES = frozenset(
     {"con", "prn", "aux", "nul"}
     | {f"com{number}" for number in range(1, 10)}
     | {f"lpt{number}" for number in range(1, 10)}
+)
+_REPORT_ERROR_CATEGORIES = frozenset(
+    {
+        "interrupted_commit_recovered",
+        "merge_conflict",
+        "no_comments_collected",
+        "reported_total_unavailable",
+    }
+)
+
+type SupervisionStatus = Literal[
+    "ready", "login_failed", "challenge_unresolved", "access_restricted"
+]
+type ChallengeAction = DragAction | ClickAction
+_SUPERVISION_STATUSES = frozenset(
+    {"ready", "login_failed", "challenge_unresolved", "access_restricted"}
 )
 
 
@@ -85,6 +106,7 @@ class BrowserResult:
     collection_finished_at: datetime
     collection_errors: list[CollectionError] = field(default_factory=list)
     status: str = "success"
+    run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +188,10 @@ def video_key_is_safe(value: str) -> bool:
     )
 
 
+def _run_id_is_safe(value: str) -> bool:
+    return bool(value) and value.strip() == value and video_key_is_safe(value)
+
+
 def manifest_paths_are_safe(manifest: CollectionManifest) -> bool:
     """Reject unsafe or case-insensitively colliding output directory keys."""
 
@@ -210,7 +236,12 @@ def _write_run_report(
                 "collected_total": result.collected_total,
                 "collection_finished_at": browser_result.collection_finished_at.isoformat(),
                 "collection_started_at": browser_result.collection_started_at.isoformat(),
-                "errors": [error.category for error in errors],
+                "errors": [
+                    error.category
+                    if error.category in _REPORT_ERROR_CATEGORIES
+                    else "collection_error"
+                    for error in errors
+                ],
                 "pages_requested": browser_result.pages_requested,
                 "pages_succeeded": browser_result.pages_succeeded,
                 "platform": result.platform,
@@ -244,6 +275,62 @@ def _write_run_report(
     return True
 
 
+def _recover_previous_generation(
+    output_root: Path,
+    platform: Platform,
+    video_key: str,
+    target: Path,
+    staging: Path,
+) -> tuple[bool, bool]:
+    """Return ``(recovered, failed_closed)`` for an absent target."""
+
+    backups_root = output_root / ".backup"
+    try:
+        if not backups_root.exists():
+            return False, False
+        if backups_root.is_symlink() or not backups_root.is_dir():
+            return False, True
+        run_directories = list(backups_root.iterdir())
+    except OSError:
+        return False, True
+
+    candidates: list[Path] = []
+    for run_directory in run_directories:
+        try:
+            if run_directory.is_symlink() or not run_directory.is_dir():
+                return False, True
+            platform_directory = run_directory / platform
+            if not platform_directory.exists() and not platform_directory.is_symlink():
+                continue
+            if platform_directory.is_symlink() or not platform_directory.is_dir():
+                return False, True
+            candidate = platform_directory / video_key
+            if not candidate.exists() and not candidate.is_symlink():
+                continue
+            if candidate.is_symlink() or not candidate.is_dir():
+                return False, True
+            backup_video, _, _ = validate_generation(candidate)
+        except (OSError, ArtifactValidationError):
+            return False, True
+        if backup_video.platform != platform or backup_video.raw_video_id != video_key:
+            return False, True
+        candidates.append(candidate)
+    if not candidates:
+        return False, False
+    if len(candidates) != 1:
+        return False, True
+    try:
+        recovered = recover_interrupted_commit(
+            CommitPaths(staging=staging, target=target, backup=candidates[0])
+        )
+        if not recovered:
+            return False, True
+        validate_generation(target)
+    except (ArtifactCommitError, ArtifactValidationError):
+        return False, True
+    return True, False
+
+
 def run_pilot(
     request: PilotRequest,
     browser_result: BrowserResult,
@@ -252,7 +339,12 @@ def run_pilot(
 ) -> PilotResult:
     """Select, merge, validate, and commit one browser collection result."""
 
-    run_id = uuid4().hex
+    supplied_run_id = browser_result.run_id
+    run_id = (
+        supplied_run_id
+        if supplied_run_id is not None and _run_id_is_safe(supplied_run_id)
+        else uuid4().hex
+    )
 
     def finish(
         result: PilotResult,
@@ -296,8 +388,18 @@ def run_pilot(
     selected = select_comments(current.comments, decision.target)
 
     target = output_root / "raw" / request.platform / video_key
+    staging = output_root / ".staging" / run_id / request.platform / video_key
+    recovered = False
+    if not target.exists() and not target.is_symlink():
+        recovered, recovery_failed = _recover_previous_generation(
+            output_root, request.platform, video_key, target, staging
+        )
+        if recovery_failed:
+            return finish(_result(request, video_key, "backup_recovery_failed"))
     previous: list[RawComment] = []
     if target.exists() or target.is_symlink():
+        if target.is_symlink():
+            return finish(_result(request, video_key, "previous_artifacts_invalid"))
         try:
             previous_video, previous, _ = validate_generation(target)
         except ArtifactValidationError:
@@ -314,6 +416,10 @@ def run_pilot(
         return finish(_result(request, video_key, "comment_merge_failed"))
 
     errors = list(browser_result.collection_errors)
+    if recovered:
+        errors.append(
+            _collection_error("interrupted_commit_recovered", browser_result.collection_finished_at)
+        )
     if decision.reason is not None:
         errors.append(_collection_error(decision.reason, browser_result.collection_finished_at))
     for conflict in merged.conflicts:
@@ -340,7 +446,7 @@ def run_pilot(
         return finish(_result(request, video_key, "collection_invalid"), errors)
 
     paths = CommitPaths(
-        staging=output_root / ".staging" / run_id / request.platform / video_key,
+        staging=staging,
         target=target,
         backup=output_root / ".backup" / run_id / request.platform / video_key,
     )
@@ -391,11 +497,77 @@ def run_batch(
     return BatchResult.from_results(results)
 
 
+class SupervisionGate(Protocol):
+    def wait_for_ready(self, page: object, timeout_seconds: float) -> SupervisionStatus: ...
+
+
+def _stderr_prompt(message: str) -> None:
+    sys.stderr.write(f"{message}\n")
+    sys.stderr.flush()
+
+
+class CliSupervisionGate:
+    """Wait once for a fixed operator status without observing browser keyboard events."""
+
+    def __init__(
+        self,
+        *,
+        read_line: Callable[[], str] = input,
+        write_prompt: Callable[[str], None] = _stderr_prompt,
+    ) -> None:
+        self._read_line = read_line
+        self._write_prompt = write_prompt
+
+    def wait_for_ready(self, page: object, timeout_seconds: float) -> SupervisionStatus:
+        del page
+        if timeout_seconds <= 0:
+            return "login_failed"
+        self._write_prompt(
+            "Complete visible login or manual challenge handling, then enter one status: "
+            "ready, login_failed, challenge_unresolved, or access_restricted "
+            f"(timeout {timeout_seconds:g}s)."
+        )
+        result: Queue[SupervisionStatus] = Queue(maxsize=1)
+
+        def read_status() -> None:
+            try:
+                answer = self._read_line()
+            except (Exception, KeyboardInterrupt):
+                answer = "login_failed"
+            status: SupervisionStatus = (
+                cast(SupervisionStatus, answer)
+                if answer in _SUPERVISION_STATUSES
+                else "login_failed"
+            )
+            result.put(status)
+
+        Thread(target=read_status, daemon=True).start()
+        try:
+            return result.get(timeout=timeout_seconds)
+        except Empty:
+            return "login_failed"
+
+
 class BrowserVideoCollector:
     """Collect supported response families in one headed, ephemeral browser session."""
 
+    def __init__(
+        self,
+        *,
+        supervisor: SupervisionGate | None = None,
+        supervision_timeout_seconds: float = 120.0,
+        challenge_action: ChallengeAction | None = None,
+        challenge_id: str = "supervised",
+    ) -> None:
+        self._supervisor = supervisor or CliSupervisionGate()
+        self._supervision_timeout_seconds = supervision_timeout_seconds
+        self._challenge_action = challenge_action
+        self._challenge_id = challenge_id
+
     def collect_pilot(self, request: PilotRequest, output_root: Path) -> PilotResult:
-        return run_pilot(request, self._browse(request), output_root=output_root)
+        run_id = uuid4().hex
+        browser_result = self._browse(request, output_root, run_id=run_id)
+        return run_pilot(request, browser_result, output_root=output_root)
 
     def collect(self, item: ManifestVideo, output_root: Path) -> PilotResult:
         request = PilotRequest.model_validate(
@@ -403,7 +575,14 @@ class BrowserVideoCollector:
         )
         return self.collect_pilot(request, output_root)
 
-    def _browse(self, request: PilotRequest) -> BrowserResult:
+    def _browse(
+        self,
+        request: PilotRequest,
+        output_root: Path = Path(".local-data/m2-real"),
+        *,
+        run_id: str | None = None,
+    ) -> BrowserResult:
+        run_id = run_id if run_id is not None and _run_id_is_safe(run_id) else uuid4().hex
         started = datetime.now(UTC)
         adapter: PlatformAdapter = (
             BilibiliAdapter() if request.platform == "bilibili" else DouyinAdapter()
@@ -454,18 +633,39 @@ class BrowserVideoCollector:
         try:
             with BrowserSession() as session:
                 session.open(str(request.url), adapter, consume)
-                for stratum in _STRATA:
-                    current_stratum = stratum
-                    if perform_stratum_action(session.page, stratum) == "performed":
-                        sort_modes.append(stratum)
-                        session.page.wait_for_timeout(750)
+                supervision_status = self._supervisor.wait_for_ready(
+                    session.page, self._supervision_timeout_seconds
+                )
+                if supervision_status != "ready":
+                    status = supervision_status
+                elif self._challenge_action is not None:
+                    if not video_key_is_safe(self._challenge_id):
+                        status = "challenge_unresolved"
+                    else:
+                        challenge = ChallengeHandler(
+                            output_root / "challenges" / run_id / self._challenge_id,
+                            confirm=lambda: True,
+                        ).attempt(session.page, self._challenge_action)
+                        if challenge.status != "attempted":
+                            status = "challenge_unresolved"
+                        else:
+                            status = self._supervisor.wait_for_ready(
+                                session.page, self._supervision_timeout_seconds
+                            )
+                if status == "success" or status == "ready":
+                    status = "success"
+                    for stratum in _STRATA:
+                        current_stratum = stratum
+                        if perform_stratum_action(session.page, stratum) == "performed":
+                            sort_modes.append(stratum)
+                            session.page.wait_for_timeout(750)
         except ResponseShapeChanged:
             status = "response_shape_changed"
         except BrowserSessionError as error:
             status = (
                 "response_shape_changed"
                 if str(error) == "response_processing_failed"
-                else "access_restricted"
+                else "collection_failed"
             )
         except Exception:
             status = "collection_failed"
@@ -485,4 +685,5 @@ class BrowserVideoCollector:
             collection_finished_at=finished,
             collection_errors=errors,
             status=status,
+            run_id=run_id,
         )

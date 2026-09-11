@@ -52,9 +52,24 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _output_root(raw: object) -> Path | None:
-    if not isinstance(raw, str) or not raw.strip() or "\x00" in raw:
+    if (
+        not isinstance(raw, str)
+        or not raw.strip()
+        or "\x00" in raw
+        or raw.startswith(("\\\\", "//"))
+    ):
         return None
-    return Path(raw)
+    try:
+        workspace = Path.cwd().resolve(strict=True)
+        boundary = (workspace / ".local-data" / "m2-real").resolve(strict=False)
+        candidate = Path(raw).resolve(strict=False)
+        boundary.relative_to(workspace)
+        relative = candidate.relative_to(boundary)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if any(not video_key_is_safe(part) for part in relative.parts):
+        return None
+    return candidate
 
 
 def _read_manifest(path: Path) -> CollectionManifest | None:
