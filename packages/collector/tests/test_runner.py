@@ -911,8 +911,18 @@ def test_live_collector_buffers_supported_comments_that_arrive_before_video_meta
     assert result.pages_requested == result.pages_succeeded == 1
 
 
+@pytest.mark.parametrize(
+    ("video_key", "url"),
+    [
+        ("BV1synthetic", "https://www.bilibili.com/video/BV1synthetic"),
+        (None, "https://www.bilibili.com/video/BV1synthetic"),
+        (None, "https://www.bilibili.com/video/BV1synthetic/?source=synthetic"),
+    ],
+)
 def test_live_bilibili_collector_falls_back_to_standard_page_metadata(
     monkeypatch: pytest.MonkeyPatch,
+    video_key: str | None,
+    url: str,
 ) -> None:
     comments_payload = json.loads(
         (Path(__file__).parent / "fixtures/bilibili/comments.json").read_text(encoding="utf-8")
@@ -960,8 +970,8 @@ def test_live_bilibili_collector_falls_back_to_standard_page_metadata(
     result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
         PilotRequest(
             platform="bilibili",
-            url="https://www.bilibili.com/video/BV1synthetic",
-            video_key="BV1synthetic",
+            url=url,
+            video_key=video_key,
         )
     )
 
@@ -982,8 +992,10 @@ def test_live_bilibili_collector_falls_back_to_standard_page_metadata(
 @pytest.mark.parametrize(
     ("video_key", "url", "mutation"),
     [
-        (None, "https://www.bilibili.com/video/BV1synthetic", "none"),
         ("BVother", "https://www.bilibili.com/video/BV1synthetic", "none"),
+        (None, "https://www.bilibili.com/video/BV1synthetic/extra", "none"),
+        (None, "https://www.bilibili.com/watch/BV1synthetic", "none"),
+        (None, "https://www.bilibili.com/video/CON", "none"),
         ("BV1synthetic", "https://www.bilibili.com/video/BV1synthetic", "missing_upper"),
         ("BV1synthetic", "https://www.bilibili.com/video/BV1synthetic", "bad_total"),
         ("BV1synthetic", "https://www.bilibili.com/video/BV1synthetic", "missing_title"),

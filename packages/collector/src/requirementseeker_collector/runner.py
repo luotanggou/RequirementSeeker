@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Literal, Protocol, Self, cast
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from playwright.sync_api import (
@@ -889,16 +889,23 @@ def _bilibili_video_from_page(
     page: Page, request: PilotRequest, context: BilibiliCommentContext
 ) -> RawVideo:
     try:
-        video_key = request.video_key
-        path_parts = [part for part in urlsplit(str(request.url)).path.split("/") if part]
+        path_parts = urlsplit(str(request.url)).path.split("/")
+        if len(path_parts) == 4 and path_parts[-1] == "":
+            path_parts.pop()
+        if len(path_parts) != 3 or path_parts[:2] != ["", "video"]:
+            raise ResponseShapeChanged("response_shape_changed")
+        extracted_key = path_parts[2]
+        requested_key = request.video_key
         if (
-            video_key is None
-            or len(path_parts) != 2
-            or path_parts[0] != "video"
-            or path_parts[1] != video_key
-            or not video_key_is_safe(video_key)
+            unquote(extracted_key) != extracted_key
+            or not extracted_key
+            or len(extracted_key) > 256
+            or any(character.isspace() for character in extracted_key)
+            or not video_key_is_safe(extracted_key)
+            or (requested_key is not None and requested_key != extracted_key)
         ):
             raise ResponseShapeChanged("response_shape_changed")
+        video_key = requested_key or extracted_key
         title = page.locator('meta[property="og:title"]').get_attribute("content")
         description = page.locator('meta[name="description"]').get_attribute("content")
         if not isinstance(title, str) or not isinstance(description, str):
