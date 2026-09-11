@@ -28,6 +28,7 @@ from playwright.sync_api import (
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from .adapters import BilibiliAdapter, DouyinAdapter, PlatformAdapter, ResponseShapeChanged
+from .adapters.bilibili import BilibiliCommentContext
 from .artifacts import (
     ArtifactCommitError,
     ArtifactValidationError,
@@ -884,6 +885,44 @@ def _video_from_local_page(page: Page, platform: Platform) -> RawVideo:
         raise ResponseShapeChanged("response_shape_changed") from None
 
 
+def _bilibili_video_from_page(
+    page: Page, request: PilotRequest, context: BilibiliCommentContext
+) -> RawVideo:
+    try:
+        video_key = request.video_key
+        path_parts = [part for part in urlsplit(str(request.url)).path.split("/") if part]
+        if (
+            video_key is None
+            or len(path_parts) != 2
+            or path_parts[0] != "video"
+            or path_parts[1] != video_key
+            or not video_key_is_safe(video_key)
+        ):
+            raise ResponseShapeChanged("response_shape_changed")
+        title = page.locator('meta[property="og:title"]').get_attribute("content")
+        description = page.locator('meta[name="description"]').get_attribute("content")
+        if not isinstance(title, str) or not isinstance(description, str):
+            raise ResponseShapeChanged("response_shape_changed")
+        return RawVideo(
+            platform="bilibili",
+            raw_video_id=video_key,
+            raw_author_id=context.video_author_id,
+            title=title,
+            description=description,
+            published_at=None,
+            duration_seconds=None,
+            total_comment_count=context.total_comment_count,
+            view_count=None,
+            like_count=None,
+            favorite_count=None,
+            share_count=None,
+            author_follower_count=None,
+            captured_at=datetime.now(UTC),
+        )
+    except Exception:
+        raise ResponseShapeChanged("response_shape_changed") from None
+
+
 def collect_from_page(
     local_url: str,
     adapter: PlatformAdapter,
@@ -1153,6 +1192,7 @@ class BrowserVideoCollector:
         current_stratum: Stratum = "top"
         ranks: dict[Stratum, int] = {stratum: 1 for stratum in _STRATA}
         pending: list[tuple[Mapping[str, object], Stratum]] = []
+        comment_context: BilibiliCommentContext | None = None
 
         def parse_comments(payload: Mapping[str, object], stratum: Stratum) -> None:
             nonlocal pages_succeeded
@@ -1170,29 +1210,57 @@ class BrowserVideoCollector:
                 sort_modes.append(stratum)
 
         def consume(url: str, payload: object) -> None:
-            nonlocal video, pages_requested
+            nonlocal comment_context, video, pages_requested
             kind = adapter.response_kind(url)
             if kind is None or not isinstance(payload, Mapping):
                 return
             if kind == "video":
-                video = adapter.parse_video_response(payload).video
+                parsed_video = adapter.parse_video_response(payload).video
+                if (
+                    comment_context is not None
+                    and parsed_video.raw_author_id != comment_context.video_author_id
+                ):
+                    raise ResponseShapeChanged("response_shape_changed")
+                video = parsed_video
                 while pending:
                     pending_payload, pending_stratum = pending.pop(0)
                     parse_comments(pending_payload, pending_stratum)
                 return
             pages_requested += 1
+            if isinstance(adapter, BilibiliAdapter) and kind == "comments":
+                parsed_context = adapter.parse_comment_context(payload)
+                if (comment_context is not None and comment_context != parsed_context) or (
+                    video is not None and video.raw_author_id != parsed_context.video_author_id
+                ):
+                    raise ResponseShapeChanged("response_shape_changed")
+                comment_context = parsed_context
             if video is None:
                 pending.append((payload, current_stratum))
                 return
             parse_comments(payload, current_stratum)
 
+        def establish_bilibili_fallback(page: Page) -> None:
+            nonlocal video
+            if (
+                video is not None
+                or not isinstance(adapter, BilibiliAdapter)
+                or comment_context is None
+            ):
+                return
+            video = _bilibili_video_from_page(page, request, comment_context)
+            while pending:
+                pending_payload, pending_stratum = pending.pop(0)
+                parse_comments(pending_payload, pending_stratum)
+
         status = "success"
         try:
             with BrowserSession() as session:
                 session.open(str(request.url), adapter, consume)
+                establish_bilibili_fallback(session.page)
                 supervision_status = self._supervisor.wait_for_ready(
                     session.page, self._supervision_timeout_seconds
                 )
+                establish_bilibili_fallback(session.page)
                 if supervision_status != "ready":
                     status = supervision_status
                 elif self._challenge_action is not None:
@@ -1226,6 +1294,8 @@ class BrowserVideoCollector:
                         if perform_stratum_action(session.page, stratum) == "performed":
                             sort_modes.append(stratum)
                             session.page.wait_for_timeout(750)
+                            establish_bilibili_fallback(session.page)
+                    establish_bilibili_fallback(session.page)
         except ResponseShapeChanged:
             status = "response_shape_changed"
         except BrowserSessionError as error:

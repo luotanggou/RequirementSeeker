@@ -75,6 +75,27 @@ def test_bilibili_parses_top_level_and_reply() -> None:
     assert page.next_cursor == "2"
 
 
+def test_bilibili_parses_strict_comment_video_context() -> None:
+    context = BilibiliAdapter().parse_comment_context(load_fixture("bilibili/comments.json"))
+
+    assert context.video_author_id == "42"
+    assert context.total_comment_count == 2
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"code": 0, "data": {"cursor": {"all_count": 2}}},
+        {"code": 0, "data": {"upper": {"mid": 42}, "cursor": {}}},
+        {"code": 0, "data": {"upper": {"mid": True}, "cursor": {"all_count": 2}}},
+        {"code": 0, "data": {"upper": {"mid": 42}, "cursor": {"all_count": -1}}},
+    ],
+)
+def test_bilibili_rejects_incomplete_comment_video_context(payload: dict[str, Any]) -> None:
+    with pytest.raises(ResponseShapeChanged, match="^response_shape_changed$"):
+        BilibiliAdapter().parse_comment_context(payload)
+
+
 @pytest.mark.parametrize("field", ["rpid", "message"])
 @pytest.mark.parametrize("value", [[], {}, True, 1.5])
 def test_bilibili_rejects_non_scalar_required_comment_fields(field: str, value: object) -> None:

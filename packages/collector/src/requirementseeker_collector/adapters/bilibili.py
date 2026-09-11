@@ -1,6 +1,7 @@
 """Strict parser for supported Bilibili JSON response families."""
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import ValidationError
@@ -29,6 +30,12 @@ _RESPONSE_PATHS: dict[str, ResponseKind] = {
     "/x/v2/reply/wbi/main": "comments",
     "/x/v2/reply/reply": "replies",
 }
+
+
+@dataclass(frozen=True)
+class BilibiliCommentContext:
+    video_author_id: str
+    total_comment_count: int
 
 
 def _comment(
@@ -87,6 +94,23 @@ class BilibiliAdapter:
         except (ResponseShapeChanged, ValidationError, TypeError, ValueError):
             raise ResponseShapeChanged("response_shape_changed") from None
         return ParsedVideo(video)
+
+    def parse_comment_context(self, payload: Mapping[str, Any]) -> BilibiliCommentContext:
+        try:
+            if payload.get("code") != 0:
+                raise ResponseShapeChanged("response_shape_changed")
+            data = mapping(payload.get("data"))
+            upper = mapping(data.get("upper"))
+            cursor = mapping(data.get("cursor"))
+            total = optional_int(cursor.get("all_count"))
+            if total is None:
+                raise ResponseShapeChanged("response_shape_changed")
+            return BilibiliCommentContext(
+                video_author_id=required_identifier(upper.get("mid")),
+                total_comment_count=total,
+            )
+        except (ResponseShapeChanged, TypeError, ValueError):
+            raise ResponseShapeChanged("response_shape_changed") from None
 
     def parse_comment_response(
         self,

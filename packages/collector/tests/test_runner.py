@@ -911,6 +911,241 @@ def test_live_collector_buffers_supported_comments_that_arrive_before_video_meta
     assert result.pages_requested == result.pages_succeeded == 1
 
 
+def test_live_bilibili_collector_falls_back_to_standard_page_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comments_payload = json.loads(
+        (Path(__file__).parent / "fixtures/bilibili/comments.json").read_text(encoding="utf-8")
+    )
+
+    class MetaLocator:
+        def __init__(self, value: str | None) -> None:
+            self.value = value
+
+        def get_attribute(self, name: str) -> str | None:
+            assert name == "content"
+            return self.value
+
+    class FakePage:
+        metadata = {
+            'meta[property="og:title"]': "Synthetic fallback title",
+            'meta[name="description"]': "Synthetic fallback description",
+        }
+
+        def locator(self, selector: str) -> MetaLocator:
+            return MetaLocator(self.metadata.get(selector))
+
+        def wait_for_timeout(self, milliseconds: float) -> None:
+            del milliseconds
+
+    class CommentOnlySession:
+        page = FakePage()
+
+        def __enter__(self) -> CommentOnlySession:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def open(self, url: str, adapter: object, consume: object) -> None:
+            del url, adapter
+            cast(Callable[[str, object], None], consume)(
+                "https://api.bilibili.com/x/v2/reply/wbi/main",
+                comments_payload,
+            )
+
+    monkeypatch.setattr(runner, "BrowserSession", CommentOnlySession)
+    monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        PilotRequest(
+            platform="bilibili",
+            url="https://www.bilibili.com/video/BV1synthetic",
+            video_key="BV1synthetic",
+        )
+    )
+
+    assert result.status == "success"
+    assert result.video is not None
+    assert result.video.raw_video_id == "BV1synthetic"
+    assert result.video.raw_author_id == "42"
+    assert result.video.title == "Synthetic fallback title"
+    assert result.video.description == "Synthetic fallback description"
+    assert result.video.duration_seconds is None
+    assert result.video.published_at is None
+    assert result.video.total_comment_count == 2
+    assert result.video.view_count is None
+    assert [item.raw_comment_id for item in result.comments] == ["11", "12"]
+    assert result.pages_requested == result.pages_succeeded == 1
+
+
+@pytest.mark.parametrize(
+    ("video_key", "url", "mutation"),
+    [
+        (None, "https://www.bilibili.com/video/BV1synthetic", "none"),
+        ("BVother", "https://www.bilibili.com/video/BV1synthetic", "none"),
+        ("BV1synthetic", "https://www.bilibili.com/video/BV1synthetic", "missing_upper"),
+        ("BV1synthetic", "https://www.bilibili.com/video/BV1synthetic", "bad_total"),
+        ("BV1synthetic", "https://www.bilibili.com/video/BV1synthetic", "missing_title"),
+    ],
+)
+def test_live_bilibili_metadata_fallback_fails_closed_without_consistent_context(
+    monkeypatch: pytest.MonkeyPatch,
+    video_key: str | None,
+    url: str,
+    mutation: str,
+) -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures/bilibili/comments.json").read_text(encoding="utf-8")
+    )
+    data = cast(dict[str, object], payload["data"])
+    if mutation == "missing_upper":
+        data.pop("upper")
+    elif mutation == "bad_total":
+        cast(dict[str, object], data["cursor"])["all_count"] = "2"
+
+    class MetaLocator:
+        def __init__(self, value: str | None) -> None:
+            self.value = value
+
+        def get_attribute(self, name: str) -> str | None:
+            del name
+            return self.value
+
+    class FakePage:
+        def locator(self, selector: str) -> MetaLocator:
+            if mutation == "missing_title" and selector == 'meta[property="og:title"]':
+                return MetaLocator(None)
+            return MetaLocator("synthetic")
+
+        def wait_for_timeout(self, milliseconds: float) -> None:
+            del milliseconds
+
+    class CommentOnlySession:
+        page = FakePage()
+
+        def __enter__(self) -> CommentOnlySession:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def open(self, opened_url: str, adapter: object, consume: object) -> None:
+            del opened_url, adapter
+            cast(Callable[[str, object], None], consume)(
+                "https://api.bilibili.com/x/v2/reply/wbi/main", payload
+            )
+
+    monkeypatch.setattr(runner, "BrowserSession", CommentOnlySession)
+    monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        PilotRequest(platform="bilibili", url=url, video_key=video_key)
+    )
+
+    assert result.status == "response_shape_changed"
+    assert result.video is None
+    assert result.comments == []
+    assert result.pages_succeeded == 0
+
+
+def test_live_bilibili_metadata_fallback_rejects_inconsistent_comment_contexts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures/bilibili/comments.json").read_text(encoding="utf-8")
+    )
+    conflicting = json.loads(json.dumps(payload))
+    conflict_data = cast(dict[str, object], conflicting["data"])
+    cast(dict[str, object], conflict_data["upper"])["mid"] = 99
+
+    class FakePage:
+        def wait_for_timeout(self, milliseconds: float) -> None:
+            del milliseconds
+
+    class InconsistentSession:
+        page = FakePage()
+
+        def __enter__(self) -> InconsistentSession:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def open(self, url: str, adapter: object, consume: object) -> None:
+            del url, adapter
+            callback = cast(Callable[[str, object], None], consume)
+            callback("https://api.bilibili.com/x/v2/reply/wbi/main", payload)
+            callback("https://api.bilibili.com/x/v2/reply/wbi/main", conflicting)
+
+    monkeypatch.setattr(runner, "BrowserSession", InconsistentSession)
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        PilotRequest(
+            platform="bilibili",
+            url="https://www.bilibili.com/video/BV1synthetic",
+            video_key="BV1synthetic",
+        )
+    )
+
+    assert result.status == "response_shape_changed"
+    assert result.video is None
+    assert result.comments == []
+    assert result.pages_succeeded == 0
+
+
+def test_live_bilibili_metadata_fallback_rejects_later_inconsistent_video_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixtures = Path(__file__).parent / "fixtures" / "bilibili"
+    comments_payload = json.loads((fixtures / "comments.json").read_text(encoding="utf-8"))
+    video_payload = json.loads((fixtures / "video.json").read_text(encoding="utf-8"))
+    cast(dict[str, object], cast(dict[str, object], video_payload["data"])["owner"])["mid"] = 99
+
+    class MetaLocator:
+        def get_attribute(self, name: str) -> str:
+            del name
+            return "synthetic"
+
+    class FakePage:
+        def locator(self, selector: str) -> MetaLocator:
+            del selector
+            return MetaLocator()
+
+        def wait_for_timeout(self, milliseconds: float) -> None:
+            del milliseconds
+
+    class InconsistentSession:
+        page = FakePage()
+
+        def __enter__(self) -> InconsistentSession:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def open(self, url: str, adapter: object, consume: object) -> None:
+            del url, adapter
+            callback = cast(Callable[[str, object], None], consume)
+            callback("https://api.bilibili.com/x/v2/reply/wbi/main", comments_payload)
+            callback("https://api.bilibili.com/x/web-interface/view", video_payload)
+
+    monkeypatch.setattr(runner, "BrowserSession", InconsistentSession)
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        PilotRequest(
+            platform="bilibili",
+            url="https://www.bilibili.com/video/BV1synthetic",
+            video_key="BV1synthetic",
+        )
+    )
+
+    assert result.status == "response_shape_changed"
+    assert result.video is None
+    assert result.comments == []
+    assert result.pages_succeeded == 0
+
+
 def test_live_manifest_collection_revalidates_the_public_url_as_text(tmp_path: Path) -> None:
     seen: list[PilotRequest] = []
 
