@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
+import selectors
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from queue import Empty, Queue
-from threading import Thread
+from time import monotonic, sleep
 from typing import Literal, Protocol, Self, cast
 from uuid import uuid4
 
@@ -190,6 +190,14 @@ def video_key_is_safe(value: str) -> bool:
 
 def _run_id_is_safe(value: str) -> bool:
     return bool(value) and value.strip() == value and video_key_is_safe(value)
+
+
+def _challenge_id_is_safe(value: str) -> bool:
+    return (
+        bool(value)
+        and not any(character.isspace() for character in value)
+        and video_key_is_safe(value)
+    )
 
 
 def manifest_paths_are_safe(manifest: CollectionManifest) -> bool:
@@ -506,46 +514,86 @@ def _stderr_prompt(message: str) -> None:
     sys.stderr.flush()
 
 
+def _read_windows_terminal_status(timeout_seconds: float) -> str | None:
+    import msvcrt
+
+    deadline = monotonic() + timeout_seconds
+    characters: list[str] = []
+    while monotonic() < deadline:
+        if not msvcrt.kbhit():
+            sleep(min(0.05, max(0.0, deadline - monotonic())))
+            continue
+        character = msvcrt.getwch()
+        if character in {"\r", "\n"}:
+            return "".join(characters)
+        if character == "\x03":
+            return None
+        if character == "\b":
+            if characters:
+                characters.pop()
+            continue
+        if character in {"\x00", "\xe0"}:
+            if msvcrt.kbhit():
+                msvcrt.getwch()
+            continue
+        characters.append(character)
+    return None
+
+
+def _read_posix_terminal_status(timeout_seconds: float) -> str | None:
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(sys.stdin, selectors.EVENT_READ)
+        if not selector.select(timeout_seconds):
+            return None
+        line = sys.stdin.readline()
+    finally:
+        selector.close()
+    return line.rstrip("\r\n") if line else None
+
+
+def _read_terminal_status(timeout_seconds: float) -> str | None:
+    """Read one terminal line before the deadline without leaving a reader behind."""
+
+    try:
+        if timeout_seconds <= 0 or not sys.stdin.isatty():
+            return None
+        if sys.platform == "win32":
+            return _read_windows_terminal_status(timeout_seconds)
+        return _read_posix_terminal_status(timeout_seconds)
+    except (Exception, KeyboardInterrupt):
+        return None
+
+
 class CliSupervisionGate:
     """Wait once for a fixed operator status without observing browser keyboard events."""
 
     def __init__(
         self,
         *,
-        read_line: Callable[[], str] = input,
+        read_status: Callable[[float], str | None] = _read_terminal_status,
         write_prompt: Callable[[str], None] = _stderr_prompt,
     ) -> None:
-        self._read_line = read_line
+        self._read_status = read_status
         self._write_prompt = write_prompt
 
     def wait_for_ready(self, page: object, timeout_seconds: float) -> SupervisionStatus:
         del page
         if timeout_seconds <= 0:
             return "login_failed"
-        self._write_prompt(
-            "Complete visible login or manual challenge handling, then enter one status: "
-            "ready, login_failed, challenge_unresolved, or access_restricted "
-            f"(timeout {timeout_seconds:g}s)."
-        )
-        result: Queue[SupervisionStatus] = Queue(maxsize=1)
-
-        def read_status() -> None:
-            try:
-                answer = self._read_line()
-            except (Exception, KeyboardInterrupt):
-                answer = "login_failed"
-            status: SupervisionStatus = (
-                cast(SupervisionStatus, answer)
-                if answer in _SUPERVISION_STATUSES
-                else "login_failed"
-            )
-            result.put(status)
-
-        Thread(target=read_status, daemon=True).start()
         try:
-            return result.get(timeout=timeout_seconds)
-        except Empty:
+            self._write_prompt(
+                "Complete visible login or manual challenge handling, then enter one status: "
+                "ready, login_failed, challenge_unresolved, or access_restricted "
+                f"(timeout {timeout_seconds:g}s). The ready status only permits another page "
+                "check and does not authorize any mouse action."
+            )
+            answer = self._read_status(timeout_seconds)
+        except (Exception, KeyboardInterrupt):
             return "login_failed"
+        return (
+            cast(SupervisionStatus, answer) if answer in _SUPERVISION_STATUSES else "login_failed"
+        )
 
 
 class BrowserVideoCollector:
@@ -558,11 +606,13 @@ class BrowserVideoCollector:
         supervision_timeout_seconds: float = 120.0,
         challenge_action: ChallengeAction | None = None,
         challenge_id: str = "supervised",
+        challenge_confirm: Callable[[], bool] | None = None,
     ) -> None:
         self._supervisor = supervisor or CliSupervisionGate()
         self._supervision_timeout_seconds = supervision_timeout_seconds
         self._challenge_action = challenge_action
         self._challenge_id = challenge_id
+        self._challenge_confirm = challenge_confirm
 
     def collect_pilot(self, request: PilotRequest, output_root: Path) -> PilotResult:
         run_id = uuid4().hex
@@ -639,13 +689,20 @@ class BrowserVideoCollector:
                 if supervision_status != "ready":
                     status = supervision_status
                 elif self._challenge_action is not None:
-                    if not video_key_is_safe(self._challenge_id):
+                    if not _challenge_id_is_safe(self._challenge_id):
                         status = "challenge_unresolved"
                     else:
-                        challenge = ChallengeHandler(
-                            output_root / "challenges" / run_id / self._challenge_id,
-                            confirm=lambda: True,
-                        ).attempt(session.page, self._challenge_action)
+                        challenge_directory = (
+                            output_root / "challenges" / run_id / self._challenge_id
+                        )
+                        handler = (
+                            ChallengeHandler(challenge_directory)
+                            if self._challenge_confirm is None
+                            else ChallengeHandler(
+                                challenge_directory, confirm=self._challenge_confirm
+                            )
+                        )
+                        challenge = handler.attempt(session.page, self._challenge_action)
                         if challenge.status != "attempted":
                             status = "challenge_unresolved"
                         else:

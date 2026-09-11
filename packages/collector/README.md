@@ -13,9 +13,11 @@ After navigation, the CLI waits at most 120 seconds for the operator to report a
 By default, login and challenge handling are manual takeovers in the visible page; the collector
 does not guess selectors or coordinates. An API caller may explicitly provide one click or drag
 action. Only then does the collector invoke the supervised challenge handler once, save masked
-page screenshots plus a safe action record, and ask the operator to confirm the resulting page
-state. It does not capture browser keyboard events, repeat the action automatically, or use
-third-party CAPTCHA services.
+page screenshots plus a safe action record, and ask for a separate exact `yes` before the mouse
+action. Reporting `ready` only permits the collector to check the page again; it never authorizes
+that action. The collector then asks the operator to confirm the resulting page state. It does not
+capture browser keyboard events, repeat the action automatically, or use third-party CAPTCHA
+services.
 
 The response parser recognizes only these six current response families:
 

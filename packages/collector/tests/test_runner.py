@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Event
 from time import monotonic
 from typing import cast
 
@@ -611,25 +611,53 @@ def test_live_collector_does_not_invent_access_restriction_from_local_browser_er
 )
 def test_cli_supervision_gate_returns_only_explicit_fixed_statuses(reply: str) -> None:
     prompts: list[str] = []
-    gate = CliSupervisionGate(read_line=lambda: reply, write_prompt=prompts.append)
+    gate = CliSupervisionGate(read_status=lambda timeout: reply, write_prompt=prompts.append)
 
     assert gate.wait_for_ready(object(), timeout_seconds=0.1) == reply
     assert len(prompts) == 1
     assert "https://" not in prompts[0]
+    assert "does not authorize any mouse action" in prompts[0]
 
 
-def test_cli_supervision_gate_has_a_finite_timeout() -> None:
-    blocked = Event()
-    gate = CliSupervisionGate(
-        read_line=lambda: blocked.wait() or "ready", write_prompt=lambda _: None
-    )
+def test_cli_supervision_gate_timeout_leaves_no_reader_and_does_not_consume_next_status() -> None:
+    replies: list[str | None] = [None, "ready"]
+    observed_timeouts: list[float] = []
+
+    def read_status(timeout_seconds: float) -> str | None:
+        observed_timeouts.append(timeout_seconds)
+        return replies.pop(0)
+
+    gate = CliSupervisionGate(read_status=read_status, write_prompt=lambda _: None)
+    threads_before = set(threading.enumerate())
     started = monotonic()
 
     status = gate.wait_for_ready(object(), timeout_seconds=0.01)
 
     assert status == "login_failed"
     assert monotonic() - started < 0.5
-    blocked.set()
+    assert set(threading.enumerate()) == threads_before
+    assert gate.wait_for_ready(object(), timeout_seconds=0.02) == "ready"
+    assert observed_timeouts == [0.01, 0.02]
+
+
+def test_cli_supervision_gate_handles_keyboard_interrupt() -> None:
+    def interrupt(timeout_seconds: float) -> str | None:
+        del timeout_seconds
+        raise KeyboardInterrupt
+
+    gate = CliSupervisionGate(read_status=interrupt, write_prompt=lambda _: None)
+
+    assert gate.wait_for_ready(object(), timeout_seconds=0.1) == "login_failed"
+
+
+def test_cli_supervision_gate_handles_keyboard_interrupt_while_prompting() -> None:
+    def interrupt(message: str) -> None:
+        del message
+        raise KeyboardInterrupt
+
+    gate = CliSupervisionGate(read_status=lambda timeout: "ready", write_prompt=interrupt)
+
+    assert gate.wait_for_ready(object(), timeout_seconds=0.1) == "login_failed"
 
 
 class SequenceSupervisor:
@@ -741,6 +769,7 @@ def test_explicit_challenge_action_uses_one_handler_attempt_and_rechecks_gate(
         supervisor=supervisor,
         challenge_action=action,
         challenge_id="challenge-1",
+        challenge_confirm=lambda: True,
     )._browse(request(), tmp_path, run_id="../escape-run")
 
     assert result.status == "partial"
@@ -748,6 +777,73 @@ def test_explicit_challenge_action_uses_one_handler_attempt_and_rechecks_gate(
     assert len(attempts) == 1
     assert attempts[0][0].resolve().is_relative_to((tmp_path / "challenges").resolve())
     assert attempts[0][2] is action
+
+
+def test_ready_does_not_authorize_a_challenge_mouse_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures/bilibili/video.json").read_text(encoding="utf-8")
+    )
+    action = ClickAction((10, 20))
+    mouse_actions: list[object] = []
+
+    class FakeChallengeHandler:
+        def __init__(self, directory: Path, *, confirm: Callable[[], bool]) -> None:
+            del directory
+            self.confirm = confirm
+
+        def attempt(self, page: object, received_action: object) -> ChallengeResult:
+            del page
+            if not self.confirm():
+                return ChallengeResult("not_confirmed")
+            mouse_actions.append(received_action)
+            return ChallengeResult("attempted")
+
+    supervisor = SequenceSupervisor("ready")
+    monkeypatch.setattr(runner, "BrowserSession", lambda: SupervisedFakeSession(payload))
+    monkeypatch.setattr(runner, "ChallengeHandler", FakeChallengeHandler)
+    monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
+
+    result = BrowserVideoCollector(
+        supervisor=supervisor,
+        challenge_action=action,
+        challenge_confirm=lambda: False,
+    )._browse(request(), tmp_path)
+
+    assert result.status == "challenge_unresolved"
+    assert supervisor.calls == 1
+    assert mouse_actions == []
+
+
+@pytest.mark.parametrize("challenge_id", ["", " ", "two words", "unsafe\u0085id"])
+def test_challenge_id_rejects_empty_or_whitespace_values_before_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    challenge_id: str,
+) -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures/bilibili/video.json").read_text(encoding="utf-8")
+    )
+    attempts: list[object] = []
+
+    class FakeChallengeHandler:
+        def __init__(self, directory: Path, *, confirm: Callable[[], bool]) -> None:
+            del directory, confirm
+            attempts.append(object())
+
+    monkeypatch.setattr(runner, "BrowserSession", lambda: SupervisedFakeSession(payload))
+    monkeypatch.setattr(runner, "ChallengeHandler", FakeChallengeHandler)
+
+    result = BrowserVideoCollector(
+        supervisor=SequenceSupervisor("ready"),
+        challenge_action=ClickAction((10, 20)),
+        challenge_id=challenge_id,
+        challenge_confirm=lambda: True,
+    )._browse(request(), tmp_path)
+
+    assert result.status == "challenge_unresolved"
+    assert attempts == []
 
 
 def test_successful_pilot_comments_remain_strict_jsonl(tmp_path: Path) -> None:
