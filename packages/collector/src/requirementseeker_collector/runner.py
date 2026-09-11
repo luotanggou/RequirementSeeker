@@ -16,7 +16,7 @@ from typing import Literal, Protocol, Self, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from playwright.sync_api import Page, Response, sync_playwright
+from playwright.sync_api import Page, Request, Response, Route, sync_playwright
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from .adapters import BilibiliAdapter, DouyinAdapter, PlatformAdapter, ResponseShapeChanged
@@ -826,6 +826,24 @@ def _local_adapter_url(adapter: PlatformAdapter, response_url: str) -> str:
     return f"https://{host}{path}"
 
 
+def _local_request_allowed(local_url: str, request_url: str) -> bool:
+    try:
+        local = urlsplit(local_url)
+        request = urlsplit(request_url)
+        local_port = local.port or 80
+        request_port = request.port or 80
+    except ValueError:
+        return False
+    return (
+        local.scheme == request.scheme == "http"
+        and local.hostname in {"127.0.0.1", "::1"}
+        and request.hostname == local.hostname
+        and request_port == local_port
+        and request.username is None
+        and request.password is None
+    )
+
+
 def _meta_content(page: Page, name: str) -> str:
     value = page.locator(f'meta[name="{name}"]').get_attribute("content")
     if value is None:
@@ -888,7 +906,47 @@ def collect_from_page(
     sort_modes: list[str] = []
     collection_errors: list[CollectionError] = []
     response_shape_changed = False
+    network_boundary_failed = False
     pending_responses: list[tuple[Mapping[str, object], Stratum]] = []
+    in_flight_requests: dict[int, Request] = {}
+
+    def raise_if_response_failed() -> None:
+        if response_shape_changed:
+            raise ResponseShapeChanged("response_shape_changed")
+        if network_boundary_failed:
+            raise BrowserSessionError("local_page_network_blocked")
+
+    def guard_request(route: Route) -> None:
+        nonlocal network_boundary_failed
+        try:
+            if _local_request_allowed(local_url, route.request.url):
+                route.continue_()
+                return
+        except Exception:
+            pass
+        network_boundary_failed = True
+        try:
+            route.abort()
+        except Exception:
+            pass
+
+    def observe_request(request: Request) -> None:
+        nonlocal network_boundary_failed
+        in_flight_requests[id(request)] = request
+        if not _local_request_allowed(local_url, request.url):
+            network_boundary_failed = True
+
+    def finish_request(request: Request) -> None:
+        in_flight_requests.pop(id(request), None)
+
+    def settle_requests(page: Page) -> None:
+        page.wait_for_timeout(250)
+        deadline = monotonic() + 2.0
+        while in_flight_requests and monotonic() < deadline:
+            page.wait_for_timeout(50)
+        if in_flight_requests:
+            raise BrowserSessionError("local_page_request_timeout")
+        raise_if_response_failed()
 
     def parse_comment_payload(payload: Mapping[str, object], stratum: Stratum) -> None:
         nonlocal pages_succeeded
@@ -926,14 +984,20 @@ def collect_from_page(
             browser = runtime.chromium.launch(headless=headless)
             context = browser.new_context()
             try:
+                context.route("**/*", guard_request)
                 page = context.new_page()
+                page.on("request", observe_request)
                 page.on("response", consume_response)
+                page.on("requestfinished", finish_request)
+                page.on("requestfailed", finish_request)
                 page.goto(local_url)
+                raise_if_response_failed()
                 video = _video_from_local_page(page, platform)
                 page.wait_for_load_state("networkidle")
                 while pending_responses:
                     payload, stratum = pending_responses.pop(0)
                     parse_comment_payload(payload, stratum)
+                raise_if_response_failed()
                 unavailable_at = datetime.now(UTC)
                 for stratum in cast(tuple[Stratum, ...], ("top", "recent", "replies")):
                     control = page.locator(f'[data-rs-stratum="{stratum}"]')
@@ -949,17 +1013,22 @@ def collect_from_page(
 
                 target = collection_target(video.total_comment_count).target
                 scrolls = 0
-                while len(comments) < target:
+                while True:
+                    raise_if_response_failed()
+                    if len(comments) >= target:
+                        settle_requests(page)
+                        break
                     end_marker = page.locator('[data-rs-end="true"]')
                     if end_marker.count() > 0 and end_marker.first.is_visible():
+                        settle_requests(page)
                         break
                     page.mouse.wheel(0, 900)
                     page.wait_for_timeout(250)
                     scrolls += 1
-                    if response_shape_changed:
-                        raise ResponseShapeChanged("response_shape_changed")
+                    raise_if_response_failed()
                     if scrolls >= 20:
                         raise BrowserSessionError("page_collection_timeout")
+                raise_if_response_failed()
             finally:
                 context.close()
                 browser.close()
@@ -990,6 +1059,7 @@ def collect_from_page(
     )
     if not _paths_are_safe_under(output_root, paths.staging, paths.target, paths.backup):
         raise ArtifactCommitError("artifact_paths_invalid")
+    raise_if_response_failed()
     try:
         write_generation(paths.staging, video, comments, collection)
         commit_generation(paths)

@@ -28,6 +28,20 @@
       async function requestComments() {
         if (requested) return;
         requested = true;
+        if (mode === "early-unknown-end") {
+          const end = document.querySelector("#end");
+          end.hidden = false;
+          end.dataset.rsEnd = "true";
+          await fetch("/x/v2/reply/wbi/main?shape=delayed-unknown");
+          return;
+        }
+        if (mode === "external-request") {
+          const end = document.querySelector("#end");
+          end.hidden = false;
+          end.dataset.rsEnd = "true";
+          await fetch("https://example.invalid/forbidden");
+          return;
+        }
         if (mode === "stalled") return;
         if (mode === "end-empty") {
           const end = document.querySelector("#end");

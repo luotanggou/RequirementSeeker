@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -41,6 +42,8 @@ def serve_site(mode: str = "supported") -> Iterator[LocalSite]:
             elif parsed.path == "/x/v2/reply/wbi/main":
                 shape = parse_qs(parsed.query).get("shape", [""])[0]
                 comment_requests.append(shape)
+                if shape == "delayed-unknown":
+                    time.sleep(0.75)
                 body = comment_payload if shape == "supported" else b'{"code":0,"unknown":[]}'
                 content_type = "application/json"
             else:
@@ -135,6 +138,16 @@ def test_unknown_response_shape_stops_without_commit(
     assert not (tmp_path / "raw").exists()
 
 
+def test_delayed_unknown_response_cannot_race_end_marker_into_commit(tmp_path: Path) -> None:
+    with serve_site("early-unknown-end") as site:
+        with pytest.raises(ResponseShapeChanged, match="^response_shape_changed$"):
+            runner.collect_from_page(
+                site.url, BilibiliAdapter(), output_root=tmp_path, headless=True
+            )
+
+    assert not (tmp_path / "raw").exists()
+
+
 def test_response_started_during_navigation_is_not_lost(tmp_path: Path) -> None:
     with serve_site("early") as site:
         result = runner.collect_from_page(
@@ -174,6 +187,22 @@ def test_page_driver_rejects_non_loopback_url_before_navigation(tmp_path: Path) 
             output_root=tmp_path,
             headless=True,
         )
+
+    assert not (tmp_path / "raw").exists()
+
+
+def test_local_request_policy_rejects_external_origin() -> None:
+    assert not runner._local_request_allowed(
+        "http://127.0.0.1:8123/index.html", "https://example.invalid/forbidden"
+    )
+
+
+def test_external_page_request_is_aborted_without_commit(tmp_path: Path) -> None:
+    with serve_site("external-request") as site:
+        with pytest.raises(runner.BrowserSessionError, match="^local_page_network_blocked$"):
+            runner.collect_from_page(
+                site.url, BilibiliAdapter(), output_root=tmp_path, headless=True
+            )
 
     assert not (tmp_path / "raw").exists()
 
