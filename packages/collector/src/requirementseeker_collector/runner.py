@@ -71,10 +71,12 @@ type SupervisionStatus = Literal[
     "ready", "login_failed", "challenge_unresolved", "access_restricted"
 ]
 type ChallengeAction = DragAction | ClickAction
+type RecoveryError = Literal["backup_recovery_failed", "artifact_cleanup_failed"]
 _SUPERVISION_STATUSES = frozenset(
     {"ready", "login_failed", "challenge_unresolved", "access_restricted"}
 )
 _PENDING_MARKER_NAME = ".pending"
+_GENERATION_FILES = ("video.json", "comments.jsonl", "collection.json")
 
 
 class PilotRequest(BaseModel):
@@ -323,8 +325,13 @@ def _write_run_report(
     return True
 
 
-def _pending_marker(output_root: Path, run_id: str) -> Path:
-    return output_root / ".backup" / run_id / _PENDING_MARKER_NAME
+def _pending_marker(
+    output_root: Path,
+    run_id: str,
+    platform: Platform,
+    video_key: str,
+) -> Path:
+    return output_root / ".backup" / run_id / platform / f"{video_key}{_PENDING_MARKER_NAME}"
 
 
 def _create_pending_marker(output_root: Path, marker: Path) -> bool:
@@ -359,13 +366,21 @@ def _pending_transactions(
 
     transactions: list[tuple[Path, Path]] = []
     for run_directory in run_directories:
-        marker = run_directory / _PENDING_MARKER_NAME
-        candidate = run_directory / platform / video_key
         try:
             if (
                 not _run_id_is_safe(run_directory.name)
-                or not _paths_are_safe_under(output_root, run_directory, marker, candidate)
+                or not _path_is_safe_under(output_root, run_directory)
                 or not run_directory.is_dir()
+            ):
+                return [], True
+            platform_directory = run_directory / platform
+            if not platform_directory.exists():
+                continue
+            marker = platform_directory / f"{video_key}{_PENDING_MARKER_NAME}"
+            candidate = platform_directory / video_key
+            if (
+                not _paths_are_safe_under(output_root, platform_directory, marker, candidate)
+                or not platform_directory.is_dir()
             ):
                 return [], True
             if not marker.exists():
@@ -378,39 +393,73 @@ def _pending_transactions(
     return transactions, False
 
 
-def _remove_empty_parents(path: Path, stop: Path) -> None:
+def _remove_empty_parents(path: Path, stop: Path) -> bool:
     current = path
     while current != stop:
         try:
+            if not current.exists():
+                current = current.parent
+                continue
+            if any(current.iterdir()):
+                return True
             current.rmdir()
         except OSError:
-            return
+            return False
         current = current.parent
+    return True
 
 
-def _discard_historical_backup(output_root: Path, backup: Path) -> None:
+def _discard_historical_backup(output_root: Path, backup: Path) -> bool:
     if not _path_is_safe_under(output_root, backup):
-        return
+        return False
     try:
-        validate_generation(backup)
-        for name in ("video.json", "comments.jsonl", "collection.json"):
-            (backup / name).unlink()
+        if not backup.exists():
+            return True
+        if not backup.is_dir():
+            return False
+        entries = list(backup.iterdir())
+        if any(
+            entry.name not in _GENERATION_FILES or not entry.is_file() or _is_path_redirect(entry)
+            for entry in entries
+        ):
+            return False
+        if len(entries) == len(_GENERATION_FILES):
+            validate_generation(backup)
+        for entry in entries:
+            entry.unlink()
         backup.rmdir()
-        _remove_empty_parents(backup.parent, output_root / ".backup")
     except (ArtifactValidationError, OSError):
-        pass
+        return False
+    return True
 
 
-def _finish_pending_transaction(output_root: Path, backup: Path, marker: Path) -> None:
+def _finish_pending_transaction(output_root: Path, backup: Path, marker: Path) -> bool:
     if not _paths_are_safe_under(output_root, backup, marker):
-        return
+        return False
+    if not _discard_historical_backup(output_root, backup):
+        return False
     try:
         marker.unlink()
     except OSError:
-        return
-    _discard_historical_backup(output_root, backup)
-    _remove_empty_parents(backup.parent, marker.parent)
-    _remove_empty_parents(marker.parent, output_root / ".backup")
+        return False
+    return _remove_empty_parents(marker.parent, output_root / ".backup")
+
+
+def _cleanup_empty_transaction_parents(output_root: Path, platform: Platform) -> bool:
+    backups_root = output_root / ".backup"
+    try:
+        if not backups_root.exists():
+            return True
+        run_directories = list(backups_root.iterdir())
+    except OSError:
+        return False
+    for run_directory in run_directories:
+        platform_directory = run_directory / platform
+        if not _paths_are_safe_under(output_root, run_directory, platform_directory):
+            return False
+        if not _remove_empty_parents(platform_directory, backups_root):
+            return False
+    return True
 
 
 def _clear_completed_transactions(
@@ -422,11 +471,14 @@ def _clear_completed_transactions(
     transactions, failed = _pending_transactions(output_root, platform, video_key)
     if failed:
         return False
+    if len(transactions) > 1:
+        return False
     if any(marker == active_marker for _, marker in transactions):
         return False
     for backup, marker in transactions:
-        _finish_pending_transaction(output_root, backup, marker)
-    return True
+        if not _finish_pending_transaction(output_root, backup, marker):
+            return False
+    return _cleanup_empty_transaction_parents(output_root, platform)
 
 
 def _recover_previous_generation(
@@ -435,38 +487,39 @@ def _recover_previous_generation(
     video_key: str,
     target: Path,
     staging: Path,
-) -> tuple[bool, bool]:
-    """Return ``(recovered, failed_closed)`` for an absent target."""
+) -> tuple[bool, RecoveryError | None]:
+    """Return recovery state and a safe error category for an absent target."""
 
     if not _paths_are_safe_under(output_root, target, staging):
-        return False, True
+        return False, "backup_recovery_failed"
     transactions, failed = _pending_transactions(output_root, platform, video_key)
     if failed:
-        return False, True
+        return False, "backup_recovery_failed"
     if not transactions:
-        return False, False
+        return False, None
     if len(transactions) != 1:
-        return False, True
+        return False, "backup_recovery_failed"
     candidate, marker = transactions[0]
     try:
         if not candidate.is_dir():
-            return False, True
+            return False, "backup_recovery_failed"
         backup_video, _, _ = validate_generation(candidate)
     except (OSError, ArtifactValidationError):
-        return False, True
+        return False, "backup_recovery_failed"
     if backup_video.platform != platform or backup_video.raw_video_id != video_key:
-        return False, True
+        return False, "backup_recovery_failed"
     try:
         recovered = recover_interrupted_commit(
             CommitPaths(staging=staging, target=target, backup=candidate)
         )
         if not recovered:
-            return False, True
+            return False, "backup_recovery_failed"
         validate_generation(target)
     except (ArtifactCommitError, ArtifactValidationError):
-        return False, True
-    _finish_pending_transaction(output_root, candidate, marker)
-    return True, False
+        return False, "backup_recovery_failed"
+    if not _finish_pending_transaction(output_root, candidate, marker):
+        return False, "artifact_cleanup_failed"
+    return True, None
 
 
 def run_pilot(
@@ -528,16 +581,16 @@ def run_pilot(
     target = output_root / "raw" / request.platform / video_key
     staging = output_root / ".staging" / run_id / request.platform / video_key
     backup = output_root / ".backup" / run_id / request.platform / video_key
-    marker = _pending_marker(output_root, run_id)
+    marker = _pending_marker(output_root, run_id, request.platform, video_key)
     if not _paths_are_safe_under(output_root, target, staging, backup, marker):
         return finish(_result(request, video_key, "artifact_commit_failed"))
     recovered = False
     if not target.exists():
-        recovered, recovery_failed = _recover_previous_generation(
+        recovered, recovery_error = _recover_previous_generation(
             output_root, request.platform, video_key, target, staging
         )
-        if recovery_failed:
-            return finish(_result(request, video_key, "backup_recovery_failed"))
+        if recovery_error is not None:
+            return finish(_result(request, video_key, recovery_error))
     previous: list[RawComment] = []
     if target.exists() or target.is_symlink():
         if target.is_symlink():
@@ -552,7 +605,7 @@ def run_pilot(
         ):
             return finish(_result(request, video_key, "previous_artifacts_mismatch"))
         if not _clear_completed_transactions(output_root, request.platform, video_key, marker):
-            return finish(_result(request, video_key, "backup_recovery_failed"))
+            return finish(_result(request, video_key, "artifact_cleanup_failed"))
 
     try:
         merged = merge_comments(previous, selected)
@@ -595,6 +648,7 @@ def run_pilot(
         backup=backup,
     )
     had_target = target.exists()
+    cleanup_succeeded = True
     try:
         write_generation(paths.staging, video, merged.comments, collection)
         if had_target and not _create_pending_marker(output_root, marker):
@@ -604,10 +658,10 @@ def run_pilot(
     except (ArtifactCommitError, ArtifactValidationError):
         return finish(_result(request, video_key, "artifact_commit_failed"), errors)
     if had_target:
-        _finish_pending_transaction(output_root, paths.backup, marker)
+        cleanup_succeeded = _finish_pending_transaction(output_root, paths.backup, marker)
 
-    status = browser_result.status
-    if len(selected) < decision.target:
+    status = "artifact_cleanup_failed" if not cleanup_succeeded else browser_result.status
+    if status != "artifact_cleanup_failed" and len(selected) < decision.target:
         status = "partial"
     result = PilotResult(request.platform, video_key, status, decision.target, len(merged.comments))
     return finish(result, errors)

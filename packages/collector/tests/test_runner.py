@@ -61,6 +61,10 @@ def create_directory_redirect(link: Path, target: Path, kind: str) -> None:
         pytest.skip(f"directory symlink unavailable: {error}")
 
 
+def pending_marker(root: Path, run_id: str, platform: str, video_key: str) -> Path:
+    return root / ".backup" / run_id / platform / f"{video_key}.pending"
+
+
 def video(platform: str = "bilibili", video_key: str = "BVfake") -> RawVideo:
     return RawVideo.model_validate(
         {
@@ -283,7 +287,7 @@ def test_pilot_recovers_pending_valid_backup_before_merging_current_comments(
     backup = tmp_path / ".backup" / "interrupted" / "bilibili" / "BVfake"
     backup.parent.mkdir(parents=True)
     target.replace(backup)
-    (tmp_path / ".backup" / "interrupted" / ".pending").write_bytes(b"")
+    pending_marker(tmp_path, "interrupted", "bilibili", "BVfake").write_bytes(b"")
 
     result = run_pilot(request(), browser_result(comments=[comment("c3")]), output_root=tmp_path)
 
@@ -295,6 +299,40 @@ def test_pilot_recovers_pending_valid_backup_before_merging_current_comments(
     )
     assert not backup.exists()
     assert not (tmp_path / ".backup" / "interrupted").exists()
+
+
+def test_recovered_target_with_marker_cleanup_failure_reports_cleanup_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert run_pilot(request(), browser_result(), output_root=tmp_path).status == "success"
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    backup = tmp_path / ".backup" / "interrupted" / "bilibili" / "BVfake"
+    backup.parent.mkdir(parents=True)
+    target.replace(backup)
+    marker = pending_marker(tmp_path, "interrupted", "bilibili", "BVfake")
+    marker.write_bytes(b"")
+    original_unlink = Path.unlink
+    deny_marker = True
+
+    def deny_once(path: Path, *args: object, **kwargs: object) -> None:
+        if deny_marker and path == marker:
+            raise PermissionError("denied")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", deny_once)
+    failed = run_pilot(request(), browser_result(comments=[comment("c3")]), output_root=tmp_path)
+
+    assert failed.status == "artifact_cleanup_failed"
+    assert marker.exists()
+    _, comments, _ = validate_generation(target)
+    assert [item.raw_comment_id for item in comments] == ["c1", "c2"]
+
+    deny_marker = False
+    retried = run_pilot(request(), browser_result(comments=[comment("c3")]), output_root=tmp_path)
+
+    assert retried.status == "partial"
+    _, comments, _ = validate_generation(target)
+    assert [item.raw_comment_id for item in comments] == ["c1", "c2", "c3"]
 
 
 def test_pilot_does_not_restore_a_backup_over_an_existing_target(tmp_path: Path) -> None:
@@ -320,7 +358,7 @@ def test_pilot_fails_closed_when_multiple_pending_backup_candidates_exist(tmp_pa
         candidate = tmp_path / ".backup" / run_id / "bilibili" / "BVfake"
         candidate.parent.mkdir(parents=True)
         shutil.copytree(source, candidate)
-        (tmp_path / ".backup" / run_id / ".pending").write_bytes(b"")
+        pending_marker(tmp_path, run_id, "bilibili", "BVfake").write_bytes(b"")
     collector_input = browser_result(comments=[comment("c3")])
 
     result = run_pilot(request(), collector_input, output_root=tmp_path)
@@ -338,7 +376,7 @@ def test_pilot_fails_closed_for_invalid_or_symbolic_backup_candidate(
     candidate = tmp_path / ".backup" / "interrupted" / "bilibili" / "BVfake"
     candidate.mkdir(parents=True)
     (candidate / "marker").write_text("not a valid generation", encoding="utf-8")
-    (tmp_path / ".backup" / "interrupted" / ".pending").write_bytes(b"")
+    pending_marker(tmp_path, "interrupted", "bilibili", "BVfake").write_bytes(b"")
     if candidate_kind == "symlink":
         original_is_symlink = Path.is_symlink
 
@@ -373,7 +411,7 @@ def test_pilot_ignores_historical_backup_and_recovers_only_pending_transaction(
     interrupted = tmp_path / ".backup" / "interrupted" / "bilibili" / "BVfake"
     interrupted.parent.mkdir(parents=True)
     target.replace(interrupted)
-    (tmp_path / ".backup" / "interrupted" / ".pending").write_bytes(b"")
+    pending_marker(tmp_path, "interrupted", "bilibili", "BVfake").write_bytes(b"")
 
     result = run_pilot(
         request(),
@@ -392,10 +430,10 @@ def test_pilot_ignores_historical_backup_and_recovers_only_pending_transaction(
 
 def test_pilot_does_not_reuse_or_remove_a_preexisting_pending_marker(tmp_path: Path) -> None:
     assert run_pilot(request(), browser_result(), output_root=tmp_path).status == "success"
-    older_marker = tmp_path / ".backup" / "older" / ".pending"
+    older_marker = pending_marker(tmp_path, "older", "bilibili", "BVfake")
     older_marker.parent.mkdir(parents=True)
     older_marker.write_bytes(b"")
-    marker = tmp_path / ".backup" / "collision" / ".pending"
+    marker = pending_marker(tmp_path, "collision", "bilibili", "BVfake")
     marker.parent.mkdir(parents=True)
     marker.write_bytes(b"")
 
@@ -405,9 +443,195 @@ def test_pilot_does_not_reuse_or_remove_a_preexisting_pending_marker(tmp_path: P
         output_root=tmp_path,
     )
 
-    assert result.status == "backup_recovery_failed"
+    assert result.status == "artifact_cleanup_failed"
     assert marker.exists()
     assert older_marker.exists()
+
+
+def test_pilot_fails_closed_for_multiple_matching_pending_markers_with_valid_target(
+    tmp_path: Path,
+) -> None:
+    assert run_pilot(request(), browser_result(), output_root=tmp_path).status == "success"
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    markers: list[Path] = []
+    for run_id in ("older-one", "older-two"):
+        backup = tmp_path / ".backup" / run_id / "bilibili" / "BVfake"
+        backup.parent.mkdir(parents=True)
+        shutil.copytree(target, backup)
+        marker = pending_marker(tmp_path, run_id, "bilibili", "BVfake")
+        marker.write_bytes(b"")
+        markers.append(marker)
+
+    result = run_pilot(
+        request(),
+        replace(browser_result(comments=[comment("c3")]), run_id="new-run"),
+        output_root=tmp_path,
+    )
+
+    assert result.status == "artifact_cleanup_failed"
+    assert all(marker.exists() for marker in markers)
+    assert not pending_marker(tmp_path, "new-run", "bilibili", "BVfake").exists()
+
+
+@pytest.mark.parametrize(
+    ("foreign_platform", "foreign_key"),
+    [("bilibili", "BVforeign"), ("douyin", "DYforeign")],
+)
+def test_pilot_preserves_foreign_pending_transaction_and_later_recovers_it(
+    tmp_path: Path,
+    foreign_platform: str,
+    foreign_key: str,
+) -> None:
+    foreign_request = request(foreign_platform, foreign_key)
+    foreign_initial = browser_result(platform=foreign_platform, video_key=foreign_key)
+    assert run_pilot(foreign_request, foreign_initial, output_root=tmp_path).status == "success"
+    foreign_target = tmp_path / "raw" / foreign_platform / foreign_key
+    foreign_backup = tmp_path / ".backup" / "foreign-pending" / foreign_platform / foreign_key
+    foreign_backup.parent.mkdir(parents=True)
+    foreign_target.replace(foreign_backup)
+    foreign_marker = pending_marker(tmp_path, "foreign-pending", foreign_platform, foreign_key)
+    foreign_marker.write_bytes(b"")
+    before = {path.name: path.read_bytes() for path in foreign_backup.iterdir()}
+
+    unrelated = run_pilot(
+        request(), replace(browser_result(), run_id="unrelated"), output_root=tmp_path
+    )
+
+    assert unrelated.status == "success"
+    assert foreign_marker.exists()
+    assert {path.name: path.read_bytes() for path in foreign_backup.iterdir()} == before
+
+    recovered = run_pilot(
+        foreign_request,
+        replace(
+            browser_result(
+                platform=foreign_platform,
+                video_key=foreign_key,
+                comments=[comment("new")],
+            ),
+            run_id="foreign-retry",
+        ),
+        output_root=tmp_path,
+    )
+
+    assert recovered.status == "partial"
+    _, comments, collection = validate_generation(foreign_target)
+    assert [item.raw_comment_id for item in comments] == ["c1", "c2", "new"]
+    assert any(
+        error.category == "interrupted_commit_recovered" for error in collection.collection_errors
+    )
+
+
+def test_existing_pending_cleanup_failure_stops_before_new_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert run_pilot(request(), browser_result(), output_root=tmp_path).status == "success"
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    backup = tmp_path / ".backup" / "old-pending" / "bilibili" / "BVfake"
+    backup.parent.mkdir(parents=True)
+    shutil.copytree(target, backup)
+    marker = pending_marker(tmp_path, "old-pending", "bilibili", "BVfake")
+    marker.write_bytes(b"")
+    original_unlink = Path.unlink
+
+    def deny_backup_cleanup(path: Path, *args: object, **kwargs: object) -> None:
+        if path == backup / "video.json":
+            raise PermissionError("denied")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", deny_backup_cleanup)
+    result = run_pilot(
+        request(),
+        replace(browser_result(comments=[comment("c3")]), run_id="new-run"),
+        output_root=tmp_path,
+    )
+
+    assert result.status == "artifact_cleanup_failed"
+    assert marker.exists()
+    assert not pending_marker(tmp_path, "new-run", "bilibili", "BVfake").exists()
+    _, comments, _ = validate_generation(target)
+    assert [item.raw_comment_id for item in comments] == ["c1", "c2"]
+
+
+@pytest.mark.parametrize("denied_entry", ["backup", "marker"])
+def test_post_commit_cleanup_failure_is_retryable_without_stacking_transactions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, denied_entry: str
+) -> None:
+    assert run_pilot(request(), browser_result(), output_root=tmp_path).status == "success"
+    backup = tmp_path / ".backup" / "cleanup-failure" / "bilibili" / "BVfake"
+    marker = pending_marker(tmp_path, "cleanup-failure", "bilibili", "BVfake")
+    original_unlink = Path.unlink
+    fail_cleanup = True
+
+    def deny_once(path: Path, *args: object, **kwargs: object) -> None:
+        denied_path = backup / "video.json" if denied_entry == "backup" else marker
+        if fail_cleanup and path == denied_path:
+            raise PermissionError("denied")
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", deny_once)
+    failed = run_pilot(
+        request(),
+        replace(browser_result(comments=[comment("c3")]), run_id="cleanup-failure"),
+        output_root=tmp_path,
+    )
+
+    assert failed.status == "artifact_cleanup_failed"
+    assert marker.exists()
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    _, comments, _ = validate_generation(target)
+    assert [item.raw_comment_id for item in comments] == ["c1", "c2", "c3"]
+
+    fail_cleanup = False
+    retried = run_pilot(
+        request(),
+        replace(browser_result(comments=[comment("c4")]), run_id="cleanup-retry"),
+        output_root=tmp_path,
+    )
+
+    assert retried.status == "partial"
+    _, comments, _ = validate_generation(target)
+    assert [item.raw_comment_id for item in comments] == ["c1", "c2", "c3", "c4"]
+    assert not marker.parent.exists()
+    assert not marker.exists()
+
+
+def test_post_commit_parent_cleanup_failure_is_reported_and_later_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert run_pilot(request(), browser_result(), output_root=tmp_path).status == "success"
+    marker = pending_marker(tmp_path, "parent-failure", "bilibili", "BVfake")
+    original_rmdir = Path.rmdir
+    fail_cleanup = True
+
+    def deny_once(path: Path) -> None:
+        if fail_cleanup and path == marker.parent:
+            raise PermissionError("denied")
+        original_rmdir(path)
+
+    monkeypatch.setattr(Path, "rmdir", deny_once)
+    failed = run_pilot(
+        request(),
+        replace(browser_result(comments=[comment("c3")]), run_id="parent-failure"),
+        output_root=tmp_path,
+    )
+
+    assert failed.status == "artifact_cleanup_failed"
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    _, comments, _ = validate_generation(target)
+    assert [item.raw_comment_id for item in comments] == ["c1", "c2", "c3"]
+
+    fail_cleanup = False
+    retried = run_pilot(
+        request(),
+        replace(browser_result(comments=[comment("c4")]), run_id="parent-retry"),
+        output_root=tmp_path,
+    )
+
+    assert retried.status == "partial"
+    _, comments, _ = validate_generation(target)
+    assert [item.raw_comment_id for item in comments] == ["c1", "c2", "c3", "c4"]
+    assert not marker.parent.exists()
 
 
 @pytest.mark.parametrize("link_kind", ["junction", "symlink"])
