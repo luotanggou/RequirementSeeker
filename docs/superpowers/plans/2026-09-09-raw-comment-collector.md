@@ -711,17 +711,17 @@ git commit -m "test(collector): verify browser collection flow"
 - Local only: `.local-data/m2-real/`
 - Local only: `docs/execution/2026-09-09.md`
 
-- [ ] **Step 1: Ask the user to confirm one public Bilibili URL and run the headed pilot**
+- [x] **Step 1: Ask the user to confirm one public Bilibili URL and run the headed pilot**
 
 Construct `uv run --project packages/collector rs-collect pilot --platform bilibili --url URL` with `URL` taken verbatim from the active user response. Do not place the real URL in a tracked file; record the executed command with its URL reduced to the video key in the local execution log.
 
 Expected: a visible browser opens; login and challenge actions remain supervised; the run either produces three valid files or a structured closed failure.
 
-- [ ] **Step 2: If a real response shape differs, first add a sanitized structural fixture and failing test**
+- [x] **Step 2: If a real response shape differs, first add a sanitized structural fixture and failing test**
 
 Store only artificial field-compatible values in the tracked fixture. Keep the real response and screenshots under `.local-data/`. Run the one adapter test and confirm `ResponseShapeChanged` before changing the parser.
 
-- [ ] **Step 3: Implement only the observed compatible mapping and rerun the Bilibili pilot**
+- [x] **Step 3: Implement only the observed compatible mapping and rerun the Bilibili pilot**
 
 Expected: schema-valid `video.json`, `comments.jsonl`, `collection.json`, plus local run audit.
 
