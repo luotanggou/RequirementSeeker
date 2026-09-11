@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import selectors
+import stat
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -72,6 +74,7 @@ type ChallengeAction = DragAction | ClickAction
 _SUPERVISION_STATUSES = frozenset(
     {"ready", "login_failed", "challenge_unresolved", "access_restricted"}
 )
+_PENDING_MARKER_NAME = ".pending"
 
 
 class PilotRequest(BaseModel):
@@ -200,6 +203,41 @@ def _challenge_id_is_safe(value: str) -> bool:
     )
 
 
+def _is_path_redirect(path: Path) -> bool:
+    if path.is_symlink() or path.is_junction():
+        return True
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except FileNotFoundError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _path_is_safe_under(output_root: Path, target: Path) -> bool:
+    """Reject targets escaping through lexical paths or existing filesystem redirects."""
+
+    try:
+        lexical_root = Path(os.path.abspath(output_root))
+        lexical_target = Path(os.path.abspath(target))
+        relative = lexical_target.relative_to(lexical_root)
+        current = lexical_root
+        if _is_path_redirect(current):
+            return False
+        for part in relative.parts:
+            current /= part
+            if _is_path_redirect(current):
+                return False
+        resolved_root = lexical_root.resolve(strict=False)
+        resolved_target = lexical_target.resolve(strict=False)
+        return resolved_target == resolved_root or resolved_target.is_relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _paths_are_safe_under(output_root: Path, *targets: Path) -> bool:
+    return all(_path_is_safe_under(output_root, target) for target in targets)
+
+
 def manifest_paths_are_safe(manifest: CollectionManifest) -> bool:
     """Reject unsafe or case-insensitively colliding output directory keys."""
 
@@ -238,6 +276,10 @@ def _write_run_report(
     browser_result: BrowserResult,
     errors: Sequence[CollectionError],
 ) -> bool:
+    directory = output_root / "runs" / run_id
+    temporary = directory.with_name(f".{run_id}.writing")
+    if not _paths_are_safe_under(output_root, directory, temporary):
+        return False
     try:
         encoded = json.dumps(
             {
@@ -265,8 +307,6 @@ def _write_run_report(
         ).encode("ascii")
     except (TypeError, ValueError, OverflowError):
         return False
-    directory = output_root / "runs" / run_id
-    temporary = directory.with_name(f".{run_id}.writing")
     try:
         if directory.exists() or temporary.exists():
             return False
@@ -283,6 +323,112 @@ def _write_run_report(
     return True
 
 
+def _pending_marker(output_root: Path, run_id: str) -> Path:
+    return output_root / ".backup" / run_id / _PENDING_MARKER_NAME
+
+
+def _create_pending_marker(output_root: Path, marker: Path) -> bool:
+    if not _path_is_safe_under(output_root, marker):
+        return False
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        if not _path_is_safe_under(output_root, marker):
+            return False
+        with marker.open("xb") as output:
+            return output.write(b"") == 0
+    except (OSError, KeyboardInterrupt):
+        return False
+
+
+def _pending_transactions(
+    output_root: Path,
+    platform: Platform,
+    video_key: str,
+) -> tuple[list[tuple[Path, Path]], bool]:
+    backups_root = output_root / ".backup"
+    if not _path_is_safe_under(output_root, backups_root):
+        return [], True
+    try:
+        if not backups_root.exists():
+            return [], False
+        if not backups_root.is_dir():
+            return [], True
+        run_directories = list(backups_root.iterdir())
+    except OSError:
+        return [], True
+
+    transactions: list[tuple[Path, Path]] = []
+    for run_directory in run_directories:
+        marker = run_directory / _PENDING_MARKER_NAME
+        candidate = run_directory / platform / video_key
+        try:
+            if (
+                not _run_id_is_safe(run_directory.name)
+                or not _paths_are_safe_under(output_root, run_directory, marker, candidate)
+                or not run_directory.is_dir()
+            ):
+                return [], True
+            if not marker.exists():
+                continue
+            if not marker.is_file() or marker.stat().st_size != 0:
+                return [], True
+        except OSError:
+            return [], True
+        transactions.append((candidate, marker))
+    return transactions, False
+
+
+def _remove_empty_parents(path: Path, stop: Path) -> None:
+    current = path
+    while current != stop:
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
+def _discard_historical_backup(output_root: Path, backup: Path) -> None:
+    if not _path_is_safe_under(output_root, backup):
+        return
+    try:
+        validate_generation(backup)
+        for name in ("video.json", "comments.jsonl", "collection.json"):
+            (backup / name).unlink()
+        backup.rmdir()
+        _remove_empty_parents(backup.parent, output_root / ".backup")
+    except (ArtifactValidationError, OSError):
+        pass
+
+
+def _finish_pending_transaction(output_root: Path, backup: Path, marker: Path) -> None:
+    if not _paths_are_safe_under(output_root, backup, marker):
+        return
+    try:
+        marker.unlink()
+    except OSError:
+        return
+    _discard_historical_backup(output_root, backup)
+    _remove_empty_parents(backup.parent, marker.parent)
+    _remove_empty_parents(marker.parent, output_root / ".backup")
+
+
+def _clear_completed_transactions(
+    output_root: Path,
+    platform: Platform,
+    video_key: str,
+    active_marker: Path,
+) -> bool:
+    transactions, failed = _pending_transactions(output_root, platform, video_key)
+    if failed:
+        return False
+    if any(marker == active_marker for _, marker in transactions):
+        return False
+    for backup, marker in transactions:
+        _finish_pending_transaction(output_root, backup, marker)
+    return True
+
+
 def _recover_previous_generation(
     output_root: Path,
     platform: Platform,
@@ -292,50 +438,34 @@ def _recover_previous_generation(
 ) -> tuple[bool, bool]:
     """Return ``(recovered, failed_closed)`` for an absent target."""
 
-    backups_root = output_root / ".backup"
-    try:
-        if not backups_root.exists():
-            return False, False
-        if backups_root.is_symlink() or not backups_root.is_dir():
-            return False, True
-        run_directories = list(backups_root.iterdir())
-    except OSError:
+    if not _paths_are_safe_under(output_root, target, staging):
         return False, True
-
-    candidates: list[Path] = []
-    for run_directory in run_directories:
-        try:
-            if run_directory.is_symlink() or not run_directory.is_dir():
-                return False, True
-            platform_directory = run_directory / platform
-            if not platform_directory.exists() and not platform_directory.is_symlink():
-                continue
-            if platform_directory.is_symlink() or not platform_directory.is_dir():
-                return False, True
-            candidate = platform_directory / video_key
-            if not candidate.exists() and not candidate.is_symlink():
-                continue
-            if candidate.is_symlink() or not candidate.is_dir():
-                return False, True
-            backup_video, _, _ = validate_generation(candidate)
-        except (OSError, ArtifactValidationError):
-            return False, True
-        if backup_video.platform != platform or backup_video.raw_video_id != video_key:
-            return False, True
-        candidates.append(candidate)
-    if not candidates:
+    transactions, failed = _pending_transactions(output_root, platform, video_key)
+    if failed:
+        return False, True
+    if not transactions:
         return False, False
-    if len(candidates) != 1:
+    if len(transactions) != 1:
+        return False, True
+    candidate, marker = transactions[0]
+    try:
+        if not candidate.is_dir():
+            return False, True
+        backup_video, _, _ = validate_generation(candidate)
+    except (OSError, ArtifactValidationError):
+        return False, True
+    if backup_video.platform != platform or backup_video.raw_video_id != video_key:
         return False, True
     try:
         recovered = recover_interrupted_commit(
-            CommitPaths(staging=staging, target=target, backup=candidates[0])
+            CommitPaths(staging=staging, target=target, backup=candidate)
         )
         if not recovered:
             return False, True
         validate_generation(target)
     except (ArtifactCommitError, ArtifactValidationError):
         return False, True
+    _finish_pending_transaction(output_root, candidate, marker)
     return True, False
 
 
@@ -397,8 +527,12 @@ def run_pilot(
 
     target = output_root / "raw" / request.platform / video_key
     staging = output_root / ".staging" / run_id / request.platform / video_key
+    backup = output_root / ".backup" / run_id / request.platform / video_key
+    marker = _pending_marker(output_root, run_id)
+    if not _paths_are_safe_under(output_root, target, staging, backup, marker):
+        return finish(_result(request, video_key, "artifact_commit_failed"))
     recovered = False
-    if not target.exists() and not target.is_symlink():
+    if not target.exists():
         recovered, recovery_failed = _recover_previous_generation(
             output_root, request.platform, video_key, target, staging
         )
@@ -417,6 +551,8 @@ def run_pilot(
             or previous_video.raw_video_id != video.raw_video_id
         ):
             return finish(_result(request, video_key, "previous_artifacts_mismatch"))
+        if not _clear_completed_transactions(output_root, request.platform, video_key, marker):
+            return finish(_result(request, video_key, "backup_recovery_failed"))
 
     try:
         merged = merge_comments(previous, selected)
@@ -456,13 +592,19 @@ def run_pilot(
     paths = CommitPaths(
         staging=staging,
         target=target,
-        backup=output_root / ".backup" / run_id / request.platform / video_key,
+        backup=backup,
     )
+    had_target = target.exists()
     try:
         write_generation(paths.staging, video, merged.comments, collection)
+        if had_target and not _create_pending_marker(output_root, marker):
+            raise ArtifactCommitError("pending_marker_creation_failed")
         commit_generation(paths)
+        validate_generation(paths.target)
     except (ArtifactCommitError, ArtifactValidationError):
         return finish(_result(request, video_key, "artifact_commit_failed"), errors)
+    if had_target:
+        _finish_pending_transaction(output_root, paths.backup, marker)
 
     status = browser_result.status
     if len(selected) < decision.target:
@@ -695,20 +837,23 @@ class BrowserVideoCollector:
                         challenge_directory = (
                             output_root / "challenges" / run_id / self._challenge_id
                         )
-                        handler = (
-                            ChallengeHandler(challenge_directory)
-                            if self._challenge_confirm is None
-                            else ChallengeHandler(
-                                challenge_directory, confirm=self._challenge_confirm
-                            )
-                        )
-                        challenge = handler.attempt(session.page, self._challenge_action)
-                        if challenge.status != "attempted":
+                        if not _path_is_safe_under(output_root, challenge_directory):
                             status = "challenge_unresolved"
                         else:
-                            status = self._supervisor.wait_for_ready(
-                                session.page, self._supervision_timeout_seconds
+                            handler = (
+                                ChallengeHandler(challenge_directory)
+                                if self._challenge_confirm is None
+                                else ChallengeHandler(
+                                    challenge_directory, confirm=self._challenge_confirm
+                                )
                             )
+                            challenge = handler.attempt(session.page, self._challenge_action)
+                            if challenge.status != "attempted":
+                                status = "challenge_unresolved"
+                            else:
+                                status = self._supervisor.wait_for_ready(
+                                    session.page, self._supervision_timeout_seconds
+                                )
                 if status == "success" or status == "ready":
                     status = "success"
                     for stratum in _STRATA:

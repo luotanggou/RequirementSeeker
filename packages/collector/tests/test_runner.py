@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import replace
@@ -37,6 +39,26 @@ from requirementseeker_collector.runner import (
 )
 
 NOW = datetime(2026, 9, 9, 1, tzinfo=UTC)
+
+
+def create_directory_redirect(link: Path, target: Path, kind: str) -> None:
+    target.mkdir(parents=True)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "junction":
+        if sys.platform != "win32":
+            pytest.skip("Windows junction test")
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        return
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink unavailable: {error}")
 
 
 def video(platform: str = "bilibili", video_key: str = "BVfake") -> RawVideo:
@@ -252,7 +274,7 @@ def test_pilot_merges_previous_comments_and_records_identity_conflict(tmp_path: 
     assert "changed identity" not in conflict.description
 
 
-def test_pilot_recovers_unique_valid_backup_before_merging_current_comments(
+def test_pilot_recovers_pending_valid_backup_before_merging_current_comments(
     tmp_path: Path,
 ) -> None:
     first = run_pilot(request(), browser_result(), output_root=tmp_path)
@@ -261,6 +283,7 @@ def test_pilot_recovers_unique_valid_backup_before_merging_current_comments(
     backup = tmp_path / ".backup" / "interrupted" / "bilibili" / "BVfake"
     backup.parent.mkdir(parents=True)
     target.replace(backup)
+    (tmp_path / ".backup" / "interrupted" / ".pending").write_bytes(b"")
 
     result = run_pilot(request(), browser_result(comments=[comment("c3")]), output_root=tmp_path)
 
@@ -271,6 +294,7 @@ def test_pilot_recovers_unique_valid_backup_before_merging_current_comments(
         error.category == "interrupted_commit_recovered" for error in collection.collection_errors
     )
     assert not backup.exists()
+    assert not (tmp_path / ".backup" / "interrupted").exists()
 
 
 def test_pilot_does_not_restore_a_backup_over_an_existing_target(tmp_path: Path) -> None:
@@ -288,7 +312,7 @@ def test_pilot_does_not_restore_a_backup_over_an_existing_target(tmp_path: Path)
     validate_generation(target)
 
 
-def test_pilot_fails_closed_when_multiple_backup_candidates_exist(tmp_path: Path) -> None:
+def test_pilot_fails_closed_when_multiple_pending_backup_candidates_exist(tmp_path: Path) -> None:
     source_root = tmp_path / "source"
     run_pilot(request(), browser_result(), output_root=source_root)
     source = source_root / "raw" / "bilibili" / "BVfake"
@@ -296,6 +320,7 @@ def test_pilot_fails_closed_when_multiple_backup_candidates_exist(tmp_path: Path
         candidate = tmp_path / ".backup" / run_id / "bilibili" / "BVfake"
         candidate.parent.mkdir(parents=True)
         shutil.copytree(source, candidate)
+        (tmp_path / ".backup" / run_id / ".pending").write_bytes(b"")
     collector_input = browser_result(comments=[comment("c3")])
 
     result = run_pilot(request(), collector_input, output_root=tmp_path)
@@ -313,6 +338,7 @@ def test_pilot_fails_closed_for_invalid_or_symbolic_backup_candidate(
     candidate = tmp_path / ".backup" / "interrupted" / "bilibili" / "BVfake"
     candidate.mkdir(parents=True)
     (candidate / "marker").write_text("not a valid generation", encoding="utf-8")
+    (tmp_path / ".backup" / "interrupted" / ".pending").write_bytes(b"")
     if candidate_kind == "symlink":
         original_is_symlink = Path.is_symlink
 
@@ -325,6 +351,85 @@ def test_pilot_fails_closed_for_invalid_or_symbolic_backup_candidate(
 
     assert result.status == "backup_recovery_failed"
     assert not (tmp_path / "raw" / "bilibili" / "BVfake").exists()
+
+
+def test_pilot_ignores_historical_backup_and_recovers_only_pending_transaction(
+    tmp_path: Path,
+) -> None:
+    first = run_pilot(request(), replace(browser_result(), run_id="initial"), output_root=tmp_path)
+    assert first.status == "success"
+    second = run_pilot(
+        request(),
+        replace(browser_result(comments=[comment("c3")]), run_id="update"),
+        output_root=tmp_path,
+    )
+    assert second.status == "partial"
+
+    target = tmp_path / "raw" / "bilibili" / "BVfake"
+    historical = tmp_path / ".backup" / "historical" / "bilibili" / "BVfake"
+    historical.parent.mkdir(parents=True)
+    shutil.copytree(target, historical)
+
+    interrupted = tmp_path / ".backup" / "interrupted" / "bilibili" / "BVfake"
+    interrupted.parent.mkdir(parents=True)
+    target.replace(interrupted)
+    (tmp_path / ".backup" / "interrupted" / ".pending").write_bytes(b"")
+
+    result = run_pilot(
+        request(),
+        replace(browser_result(comments=[comment("c4")]), run_id="retry"),
+        output_root=tmp_path,
+    )
+
+    assert result.status == "partial"
+    _, comments, collection = validate_generation(target)
+    assert [item.raw_comment_id for item in comments] == ["c1", "c2", "c3", "c4"]
+    assert any(
+        error.category == "interrupted_commit_recovered" for error in collection.collection_errors
+    )
+    assert historical.exists()
+
+
+def test_pilot_does_not_reuse_or_remove_a_preexisting_pending_marker(tmp_path: Path) -> None:
+    assert run_pilot(request(), browser_result(), output_root=tmp_path).status == "success"
+    older_marker = tmp_path / ".backup" / "older" / ".pending"
+    older_marker.parent.mkdir(parents=True)
+    older_marker.write_bytes(b"")
+    marker = tmp_path / ".backup" / "collision" / ".pending"
+    marker.parent.mkdir(parents=True)
+    marker.write_bytes(b"")
+
+    result = run_pilot(
+        request(),
+        replace(browser_result(comments=[comment("c3")]), run_id="collision"),
+        output_root=tmp_path,
+    )
+
+    assert result.status == "backup_recovery_failed"
+    assert marker.exists()
+    assert older_marker.exists()
+
+
+@pytest.mark.parametrize("link_kind", ["junction", "symlink"])
+@pytest.mark.parametrize("reserved", ["raw", "runs", ".staging", ".backup"])
+def test_pilot_rejects_redirected_reserved_output_tree(
+    tmp_path: Path,
+    link_kind: str,
+    reserved: str,
+) -> None:
+    output_root = tmp_path / "output"
+    outside = tmp_path / "outside" / reserved.replace(".", "dot-")
+    output_root.mkdir()
+    create_directory_redirect(output_root / reserved, outside, link_kind)
+
+    result = run_pilot(
+        request(),
+        replace(browser_result(), run_id="guarded-run"),
+        output_root=output_root,
+    )
+
+    assert result.status != "success"
+    assert list(outside.iterdir()) == []
 
 
 def test_current_run_conflict_does_not_replace_previous_valid_result(tmp_path: Path) -> None:
@@ -844,6 +949,32 @@ def test_challenge_id_rejects_empty_or_whitespace_values_before_attempt(
 
     assert result.status == "challenge_unresolved"
     assert attempts == []
+
+
+@pytest.mark.parametrize("link_kind", ["junction", "symlink"])
+def test_challenge_attempt_rejects_redirected_challenges_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    link_kind: str,
+) -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures/bilibili/video.json").read_text(encoding="utf-8")
+    )
+    output_root = tmp_path / "output"
+    outside = tmp_path / "outside" / "challenges"
+    output_root.mkdir()
+    create_directory_redirect(output_root / "challenges", outside, link_kind)
+    monkeypatch.setattr(runner, "BrowserSession", lambda: SupervisedFakeSession(payload))
+    monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
+
+    result = BrowserVideoCollector(
+        supervisor=SequenceSupervisor("ready"),
+        challenge_action=ClickAction((10, 20)),
+        challenge_confirm=lambda: True,
+    )._browse(request(), output_root, run_id="guarded-run")
+
+    assert result.status == "challenge_unresolved"
+    assert list(outside.iterdir()) == []
 
 
 def test_successful_pilot_comments_remain_strict_jsonl(tmp_path: Path) -> None:
