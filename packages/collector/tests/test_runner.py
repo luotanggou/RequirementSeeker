@@ -320,19 +320,41 @@ def test_recovered_target_with_marker_cleanup_failure_reports_cleanup_status(
         original_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", deny_once)
-    failed = run_pilot(request(), browser_result(comments=[comment("c3")]), output_root=tmp_path)
+    failed = run_pilot(
+        request(),
+        replace(
+            browser_result(comments=[comment("c3")]),
+            run_id="recovery-cleanup-failed",
+        ),
+        output_root=tmp_path,
+    )
 
     assert failed.status == "artifact_cleanup_failed"
     assert marker.exists()
     _, comments, _ = validate_generation(target)
     assert [item.raw_comment_id for item in comments] == ["c1", "c2"]
+    failed_report = json.loads(
+        (tmp_path / "runs" / "recovery-cleanup-failed" / "run.json").read_text(encoding="ascii")
+    )
+    assert failed_report["errors"] == [
+        "interrupted_commit_recovered",
+        "artifact_cleanup_failed",
+    ]
 
     deny_marker = False
-    retried = run_pilot(request(), browser_result(comments=[comment("c3")]), output_root=tmp_path)
+    retried = run_pilot(
+        request(),
+        replace(browser_result(comments=[comment("c3")]), run_id="recovery-cleanup-retry"),
+        output_root=tmp_path,
+    )
 
     assert retried.status == "partial"
     _, comments, _ = validate_generation(target)
     assert [item.raw_comment_id for item in comments] == ["c1", "c2", "c3"]
+    retry_report = json.loads(
+        (tmp_path / "runs" / "recovery-cleanup-retry" / "run.json").read_text(encoding="ascii")
+    )
+    assert "interrupted_commit_recovered" not in retry_report["errors"]
 
 
 def test_pilot_does_not_restore_a_backup_over_an_existing_target(tmp_path: Path) -> None:

@@ -60,6 +60,7 @@ _WINDOWS_DEVICE_NAMES = frozenset(
 )
 _REPORT_ERROR_CATEGORIES = frozenset(
     {
+        "artifact_cleanup_failed",
         "interrupted_commit_recovered",
         "merge_conflict",
         "no_comments_collected",
@@ -518,7 +519,7 @@ def _recover_previous_generation(
     except (ArtifactCommitError, ArtifactValidationError):
         return False, "backup_recovery_failed"
     if not _finish_pending_transaction(output_root, candidate, marker):
-        return False, "artifact_cleanup_failed"
+        return True, "artifact_cleanup_failed"
     return True, None
 
 
@@ -582,6 +583,7 @@ def run_pilot(
     staging = output_root / ".staging" / run_id / request.platform / video_key
     backup = output_root / ".backup" / run_id / request.platform / video_key
     marker = _pending_marker(output_root, run_id, request.platform, video_key)
+    errors = list(browser_result.collection_errors)
     if not _paths_are_safe_under(output_root, target, staging, backup, marker):
         return finish(_result(request, video_key, "artifact_commit_failed"))
     recovered = False
@@ -589,12 +591,24 @@ def run_pilot(
         recovered, recovery_error = _recover_previous_generation(
             output_root, request.platform, video_key, target, staging
         )
+        if recovered:
+            errors.append(
+                _collection_error(
+                    "interrupted_commit_recovered", browser_result.collection_finished_at
+                )
+            )
         if recovery_error is not None:
-            return finish(_result(request, video_key, recovery_error))
+            if recovered:
+                errors.append(
+                    _collection_error(
+                        "artifact_cleanup_failed", browser_result.collection_finished_at
+                    )
+                )
+            return finish(_result(request, video_key, recovery_error), errors)
     previous: list[RawComment] = []
     if target.exists() or target.is_symlink():
         if target.is_symlink():
-            return finish(_result(request, video_key, "previous_artifacts_invalid"))
+            return finish(_result(request, video_key, "previous_artifacts_invalid"), errors)
         try:
             previous_video, previous, _ = validate_generation(target)
         except ArtifactValidationError:
@@ -603,20 +617,15 @@ def run_pilot(
             previous_video.platform != video.platform
             or previous_video.raw_video_id != video.raw_video_id
         ):
-            return finish(_result(request, video_key, "previous_artifacts_mismatch"))
+            return finish(_result(request, video_key, "previous_artifacts_mismatch"), errors)
         if not _clear_completed_transactions(output_root, request.platform, video_key, marker):
-            return finish(_result(request, video_key, "artifact_cleanup_failed"))
+            return finish(_result(request, video_key, "artifact_cleanup_failed"), errors)
 
     try:
         merged = merge_comments(previous, selected)
     except (CurrentRunConflict, PreviousRunConflict):
-        return finish(_result(request, video_key, "comment_merge_failed"))
+        return finish(_result(request, video_key, "comment_merge_failed"), errors)
 
-    errors = list(browser_result.collection_errors)
-    if recovered:
-        errors.append(
-            _collection_error("interrupted_commit_recovered", browser_result.collection_finished_at)
-        )
     if decision.reason is not None:
         errors.append(_collection_error(decision.reason, browser_result.collection_finished_at))
     for conflict in merged.conflicts:
