@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
@@ -23,6 +23,7 @@ class LocalSite:
     server: ThreadingHTTPServer
     thread: threading.Thread
     comment_requests: list[str]
+    websocket_requests: list[str]
 
 
 @contextmanager
@@ -32,6 +33,7 @@ def serve_site(mode: str = "supported") -> Iterator[LocalSite]:
         Path(__file__).parents[1] / "fixtures" / "bilibili" / "comments.json"
     ).read_bytes()
     comment_requests: list[str] = []
+    websocket_requests: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -46,6 +48,17 @@ def serve_site(mode: str = "supported") -> Iterator[LocalSite]:
                     time.sleep(0.75)
                 body = comment_payload if shape == "supported" else b'{"code":0,"unknown":[]}'
                 content_type = "application/json"
+                if shape == "http-500":
+                    self.send_response(500)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+            elif parsed.path == "/socket":
+                websocket_requests.append(parsed.path)
+                self.send_error(400)
+                return
             else:
                 self.send_error(404)
                 return
@@ -63,7 +76,11 @@ def serve_site(mode: str = "supported") -> Iterator[LocalSite]:
     thread.start()
     host, port = server.server_address[:2]
     site = LocalSite(
-        f"http://{host}:{port}/index.html?mode={mode}", server, thread, comment_requests
+        f"http://{host}:{port}/index.html?mode={mode}",
+        server,
+        thread,
+        comment_requests,
+        websocket_requests,
     )
     try:
         yield site
@@ -205,6 +222,42 @@ def test_external_page_request_is_aborted_without_commit(tmp_path: Path) -> None
             )
 
     assert not (tmp_path / "raw").exists()
+
+
+def test_cross_origin_websocket_is_blocked_before_reaching_local_server(tmp_path: Path) -> None:
+    with serve_site("websocket") as site:
+        with pytest.raises(runner.BrowserSessionError, match="^local_page_network_blocked$"):
+            runner.collect_from_page(
+                site.url, BilibiliAdapter(), output_root=tmp_path, headless=True
+            )
+        assert site.websocket_requests == []
+
+    assert not (tmp_path / "raw").exists()
+
+
+@pytest.mark.parametrize("video_id", ["/", "\\", ".", "..", ":", "CON"])
+def test_unsafe_dom_video_id_is_rejected_before_filesystem_writes(
+    tmp_path: Path, video_id: str
+) -> None:
+    with serve_site("end-empty") as site:
+        url = f"{site.url}&video_id={quote(video_id, safe='')}"
+        with pytest.raises(ResponseShapeChanged, match="^response_shape_changed$"):
+            runner.collect_from_page(url, BilibiliAdapter(), output_root=tmp_path, headless=True)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_http_error_counts_requested_page_without_success(tmp_path: Path) -> None:
+    with serve_site("http-500") as site:
+        result = runner.collect_from_page(
+            site.url, BilibiliAdapter(), output_root=tmp_path, headless=True
+        )
+
+    assert result.collection.pages_requested == 1
+    assert result.collection.pages_succeeded == 0
+    assert [error.category for error in result.collection.collection_errors].count(
+        "page_request_failed"
+    ) == 1
 
 
 def test_local_server_is_reliably_closed() -> None:

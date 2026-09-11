@@ -21,6 +21,10 @@
     <script>
       const parameters = new URLSearchParams(window.location.search);
       const mode = parameters.get("mode") || "supported";
+      const videoId = parameters.get("video_id");
+      if (videoId !== null) {
+        document.querySelector('meta[name="rs-video-id"]').content = videoId;
+      }
       if (mode === "without-recent") {
         document.querySelector("#recent").remove();
       }
@@ -42,6 +46,14 @@
           await fetch("https://example.invalid/forbidden");
           return;
         }
+        if (mode === "websocket") {
+          const socket = new WebSocket(`ws://localhost:${window.location.port}/socket`);
+          socket.addEventListener("error", () => {});
+          const end = document.querySelector("#end");
+          end.hidden = false;
+          end.dataset.rsEnd = "true";
+          return;
+        }
         if (mode === "stalled") return;
         if (mode === "end-empty") {
           const end = document.querySelector("#end");
@@ -49,7 +61,7 @@
           end.dataset.rsEnd = "true";
           return;
         }
-        const shape = mode === "unknown" ? "unknown" : "supported";
+        const shape = mode === "unknown" ? "unknown" : mode === "http-500" ? "http-500" : "supported";
         await fetch(`/x/v2/reply/wbi/main?shape=${shape}`);
         const end = document.querySelector("#end");
         end.hidden = false;

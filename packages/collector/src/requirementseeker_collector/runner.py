@@ -16,7 +16,15 @@ from typing import Literal, Protocol, Self, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from playwright.sync_api import Page, Request, Response, Route, sync_playwright
+from playwright.sync_api import (
+    Page,
+    Request,
+    Response,
+    Route,
+    WebSocket,
+    WebSocketRoute,
+    sync_playwright,
+)
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from .adapters import BilibiliAdapter, DouyinAdapter, PlatformAdapter, ResponseShapeChanged
@@ -909,6 +917,7 @@ def collect_from_page(
     network_boundary_failed = False
     pending_responses: list[tuple[Mapping[str, object], Stratum]] = []
     in_flight_requests: dict[int, Request] = {}
+    observed_comment_requests: dict[int, Request] = {}
 
     def raise_if_response_failed() -> None:
         if response_shape_changed:
@@ -931,13 +940,32 @@ def collect_from_page(
             pass
 
     def observe_request(request: Request) -> None:
-        nonlocal network_boundary_failed
+        nonlocal network_boundary_failed, pages_requested
         in_flight_requests[id(request)] = request
         if not _local_request_allowed(local_url, request.url):
             network_boundary_failed = True
+            return
+        try:
+            kind = adapter.response_kind(_local_adapter_url(adapter, request.url))
+        except Exception:
+            kind = None
+        request_identity = id(request)
+        if kind in {"comments", "replies"} and request_identity not in observed_comment_requests:
+            observed_comment_requests[request_identity] = request
+            pages_requested += 1
 
     def finish_request(request: Request) -> None:
         in_flight_requests.pop(id(request), None)
+
+    def block_websocket(websocket: WebSocketRoute) -> None:
+        nonlocal network_boundary_failed
+        del websocket
+        network_boundary_failed = True
+
+    def observe_websocket(websocket: WebSocket) -> None:
+        nonlocal network_boundary_failed
+        del websocket
+        network_boundary_failed = True
 
     def settle_requests(page: Page) -> None:
         page.wait_for_timeout(250)
@@ -963,15 +991,17 @@ def collect_from_page(
         pages_succeeded += 1
 
     def consume_response(response: Response) -> None:
-        nonlocal pages_requested, response_shape_changed
+        nonlocal response_shape_changed
         try:
-            if not 200 <= response.status < 300:
-                return
             normalized_url = _local_adapter_url(adapter, response.url)
             kind = adapter.response_kind(normalized_url)
             if kind not in {"comments", "replies"}:
                 return
-            pages_requested += 1
+            if not 200 <= response.status < 300:
+                collection_errors.append(
+                    _collection_error("page_request_failed", datetime.now(UTC))
+                )
+                return
             payload = response.json()
             if not isinstance(payload, Mapping):
                 raise ResponseShapeChanged("response_shape_changed")
@@ -982,17 +1012,21 @@ def collect_from_page(
     try:
         with sync_playwright() as runtime:
             browser = runtime.chromium.launch(headless=headless)
-            context = browser.new_context()
+            context = browser.new_context(service_workers="block")
             try:
                 context.route("**/*", guard_request)
+                context.route_web_socket("**/*", block_websocket)
                 page = context.new_page()
                 page.on("request", observe_request)
                 page.on("response", consume_response)
                 page.on("requestfinished", finish_request)
                 page.on("requestfailed", finish_request)
+                page.on("websocket", observe_websocket)
                 page.goto(local_url)
                 raise_if_response_failed()
                 video = _video_from_local_page(page, platform)
+                if not video_key_is_safe(video.raw_video_id):
+                    raise ResponseShapeChanged("response_shape_changed")
                 page.wait_for_load_state("networkidle")
                 while pending_responses:
                     payload, stratum = pending_responses.pop(0)
