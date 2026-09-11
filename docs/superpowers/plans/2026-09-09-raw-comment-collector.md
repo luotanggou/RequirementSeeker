@@ -579,7 +579,7 @@ git commit -m "feat(collector): add supervised headed browser session"
 - Create: `packages/collector/tests/test_cli.py`
 - Create: `packages/collector/README.md`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_pilot_writes_three_valid_files(tmp_path: Path) -> None:
@@ -600,13 +600,13 @@ def test_cli_rejects_source_url_credentials_without_echo(capsys: pytest.CaptureF
     assert "pass" not in capsys.readouterr().out
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/test_runner.py packages/collector/tests/test_cli.py -q`
 
 Expected: runner and CLI imports fail.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add the `rs-collect` entry point. `pilot` accepts platform, public URL, optional video key and `--output-root` defaulting to `.local-data/m2-real`. `batch` reads a versioned manifest and processes entries in stable file order. Both emit only compact summary JSON. `run_pilot` computes target, gathers supported strata, merges prior valid comments, records conflicts, and commits artifacts. Fatal platform states are `login_failed`, `challenge_unresolved`, `access_restricted`, and `response_shape_changed`; batch skips later videos only for the same platform.
 
@@ -627,13 +627,13 @@ def run_batch(manifest: CollectionManifest, collector: VideoCollector, output_ro
 
 README must state visible login, ephemeral state, local output, challenge supervision, supported response families, commands, and the two-platform pilot gate.
 
-- [ ] **Step 4: Run CLI tests and build**
+- [x] **Step 4: Run CLI tests and build**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/test_runner.py packages/collector/tests/test_cli.py -q && uv build --project packages/collector`
 
 Expected: runner/CLI tests pass and wheel contains `requirementseeker_collector` plus `rs-collect` metadata.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector
