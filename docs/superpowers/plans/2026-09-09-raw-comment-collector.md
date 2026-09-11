@@ -648,7 +648,7 @@ git commit -m "feat(collector): add pilot and isolated batch commands"
 - Modify: `packages/collector/src/requirementseeker_collector/runner.py`
 - Modify: `packages/collector/README.md`
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 ```python
 def test_page_flow_collects_response_and_dom_metadata(local_site: str, tmp_path: Path) -> None:
@@ -670,13 +670,13 @@ def test_unknown_response_shape_stops_without_commit(local_unknown_site: str, tm
     assert not (tmp_path / "raw").exists()
 ```
 
-- [ ] **Step 2: Run test to verify it fails for missing page driver behavior**
+- [x] **Step 2: Run test to verify it fails for missing page driver behavior**
 
 Run: `uv run --project packages/collector playwright install chromium && uv run --project packages/collector pytest packages/collector/tests/integration/test_playwright_collection.py -q`
 
 Expected: tests fail because the runner does not yet drive the synthetic scroll/response flow.
 
-- [ ] **Step 3: Implement the minimal page driver behavior**
+- [x] **Step 3: Implement the minimal page driver behavior**
 
 Serve the checked-in synthetic HTML from a pytest local HTTP server. It exposes title/description meta tags, emits one artificial supported JSON response after scroll, and has a deterministic end marker. Extend the runner to scroll until target or end marker, wait for response parsing, read only metadata DOM fields, and stop on an unknown successful response shape.
 
@@ -688,13 +688,13 @@ while len(collected) < target and not adapter.page_exhausted(page):
     pages_succeeded += drain_parsed_pages(response_queue, collected)
 ```
 
-- [ ] **Step 4: Run the complete package gate**
+- [x] **Step 4: Run the complete package gate**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests -q && uv run --project packages/collector ruff check packages/collector && uv run --project packages/collector ruff format --check packages/collector && uv run --project packages/collector mypy packages/collector/src && uv lock --project packages/collector --check && uv build --project packages/collector && git diff --check`
 
 Expected: all tests and checks pass with no warnings or tracked local data.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector/tests/integration packages/collector/README.md packages/collector/src/requirementseeker_collector/runner.py
