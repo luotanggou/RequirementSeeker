@@ -69,6 +69,7 @@ _WINDOWS_DEVICE_NAMES = frozenset(
     | {f"com{number}" for number in range(1, 10)}
     | {f"lpt{number}" for number in range(1, 10)}
 )
+_WINDOWS_RESERVED_FILENAME_CHARACTERS = frozenset('<>:"/\\|?*')
 _REPORT_ERROR_CATEGORIES = frozenset(
     {
         "artifact_cleanup_failed",
@@ -204,13 +205,17 @@ class VideoCollector(Protocol):
 def video_key_is_safe(value: str) -> bool:
     stem = value.split(".", 1)[0].casefold()
     return (
-        value not in {".", ".."}
+        bool(value)
+        and value not in {".", ".."}
         and not value.endswith(".")
-        and "/" not in value
-        and "\\" not in value
-        and ":" not in value
         and stem not in _WINDOWS_DEVICE_NAMES
-        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+        and all(
+            ord(character) >= 32
+            and ord(character) != 127
+            and not character.isspace()
+            and character not in _WINDOWS_RESERVED_FILENAME_CHARACTERS
+            for character in value
+        )
     )
 
 

@@ -239,7 +239,22 @@ def test_pilot_rejects_platform_mismatch_without_writing(tmp_path: Path) -> None
 
 @pytest.mark.parametrize(
     "video_key",
-    [".", "..", "../escape", r"folder\escape", "C:escape", "name.", "CON", "com1.txt"],
+    [
+        ".",
+        "..",
+        "../escape",
+        r"folder\escape",
+        "C:escape",
+        "bad<key",
+        "bad>key",
+        'bad"key',
+        "bad|key",
+        "bad?key",
+        "bad*key",
+        "name.",
+        "CON",
+        "com1.txt",
+    ],
 )
 def test_pilot_rejects_unsafe_video_key_without_writing(tmp_path: Path, video_key: str) -> None:
     result = run_pilot(
@@ -250,6 +265,11 @@ def test_pilot_rejects_unsafe_video_key_without_writing(tmp_path: Path, video_ke
 
     assert result.status == "invalid_video_key"
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("video_key", ["", "two words", "unsafe\u0085key"])
+def test_shared_video_key_safety_rejects_empty_or_whitespace_segments(video_key: str) -> None:
+    assert runner.video_key_is_safe(video_key) is False
 
 
 def test_pilot_merges_previous_comments_and_records_identity_conflict(tmp_path: Path) -> None:
@@ -996,12 +1016,18 @@ def test_live_bilibili_collector_falls_back_to_standard_page_metadata(
         (None, "https://www.bilibili.com/video/BV1synthetic/extra", "none"),
         (None, "https://www.bilibili.com/watch/BV1synthetic", "none"),
         (None, "https://www.bilibili.com/video/CON", "none"),
+        (None, "https://www.bilibili.com/video/BV1*synthetic", "none"),
+        (None, "https://www.bilibili.com/video/BV1|synthetic", "none"),
+        (None, 'https://www.bilibili.com/video/BV1"synthetic', "none"),
+        (None, "https://www.bilibili.com/video/BV1<synthetic", "none"),
+        (None, "https://www.bilibili.com/video/BV1>synthetic", "none"),
         ("BV1synthetic", "https://www.bilibili.com/video/BV1synthetic", "missing_upper"),
         ("BV1synthetic", "https://www.bilibili.com/video/BV1synthetic", "bad_total"),
         ("BV1synthetic", "https://www.bilibili.com/video/BV1synthetic", "missing_title"),
     ],
 )
 def test_live_bilibili_metadata_fallback_fails_closed_without_consistent_context(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     video_key: str | None,
     url: str,
@@ -1052,13 +1078,14 @@ def test_live_bilibili_metadata_fallback_fails_closed_without_consistent_context
     monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
 
     result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
-        PilotRequest(platform="bilibili", url=url, video_key=video_key)
+        PilotRequest(platform="bilibili", url=url, video_key=video_key), tmp_path
     )
 
     assert result.status == "response_shape_changed"
     assert result.video is None
     assert result.comments == []
     assert result.pages_succeeded == 0
+    assert not (tmp_path / "raw").exists()
 
 
 def test_live_bilibili_metadata_fallback_rejects_inconsistent_comment_contexts(
