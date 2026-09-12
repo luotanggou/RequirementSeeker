@@ -762,7 +762,7 @@ Add `--browser chromium|chrome|edge` and `--reuse-login` to `pilot` and `batch`;
 
 Use a temporary dedicated profile and a loopback page to prove a browser-managed login marker survives closing and reopening without production code reading cookies or storage state. Skip a real Chrome/Edge channel test only when that installed channel is unavailable. Re-run browser, runner, CLI, integration, collector, and agent suites plus Ruff, format, mypy strict, lock checks, builds, and diff checks.
 
-- [ ] **Step 5: Run supervised persistent-session pilots before batch**
+- [x] **Step 5: Run supervised persistent-session pilots before batch**
 
 Use installed Chrome by default. Open one dedicated profile per platform, let the user log in, close it, then rerun the accepted Bilibili and Douyin videos with the same profile. Validate all three files, record whether counts improve, show the samples, and only then construct the accepted batch manifest. Do not open or copy the user's daily Chrome/Edge profile.
 
@@ -791,6 +791,6 @@ Extend the loopback fixture so scroll and reply expansion produce multiple artif
 
 Run pagination unit/integration tests, the complete collector and agent suites, Ruff, format, mypy strict, both lock checks, both builds, and diff checks. Complete separate specification and code-quality reviews before accessing real platforms.
 
-- [ ] **Step 5: Re-run both accepted pilots with dedicated Chrome profiles**
+- [x] **Step 5: Re-run both accepted pilots with dedicated Chrome profiles**
 
 Let the user log into each platform-specific Chrome profile once, close and reopen it to prove reuse, then collect the same accepted videos with pagination. Compare counts and stop reasons against the anonymous baselines (Bilibili 35/200, Douyin 28/200). Do not run batch until both persistent paginated samples validate.
