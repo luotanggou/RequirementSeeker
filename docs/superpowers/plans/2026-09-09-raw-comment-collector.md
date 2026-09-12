@@ -731,6 +731,37 @@ Construct the same command with `--platform douyin` and the exact URL from the a
 
 Expected: schema-valid Douyin sample or a precise stopped state requiring user action.
 
-- [ ] **Step 5: Show samples and gate batch execution**
+- [x] **Step 5: Show samples and gate batch execution**
 
 Open both platforms' `video.json`, `comments.jsonl`, `collection.json`, and run audits in visible VS Code. Record actual counts, nullable fields, strata, conflicts, challenge activity, and platform changes in `docs/execution/2026-09-09.md`. Do not run `batch` until the user explicitly accepts both samples.
+
+### Task 10: 使用专用 Chrome/Edge profile 持久化平台登录态
+
+**Files:**
+- Modify: `packages/collector/src/requirementseeker_collector/browser.py`
+- Modify: `packages/collector/src/requirementseeker_collector/runner.py`
+- Modify: `packages/collector/src/requirementseeker_collector/cli.py`
+- Modify: `packages/collector/tests/test_browser.py`
+- Modify: `packages/collector/tests/test_runner.py`
+- Modify: `packages/collector/tests/test_cli.py`
+- Modify: `packages/collector/README.md`
+
+- [ ] **Step 1: Write failing browser profile boundary tests**
+
+Verify that the existing default still launches ephemeral bundled Chromium. In explicit dedicated mode, require `chrome|edge`, map only to Playwright `chrome|msedge`, derive `.local-data/m2-real/browser-profiles/<platform>/<browser>/`, and reject symlink, junction, reparse, traversal, overlap with raw/staging/backup/runs/challenges, and paths outside the validated output root. Verify the collector never calls cookie, header, storage-state, or personal-profile import APIs.
+
+- [ ] **Step 2: Implement the minimal dedicated persistent BrowserSession**
+
+Add an immutable launch configuration. Dedicated mode uses `launch_persistent_context` with `headless=False`, the fixed browser channel, and the derived platform-specific user-data directory. Close only the returned context and preserve the browser-managed profile. Keep the existing response error propagation and cleanup priority unchanged; profile unavailable or already in use returns a fixed safe browser failure category.
+
+- [ ] **Step 3: Add explicit CLI flags and runner wiring**
+
+Add `--browser chromium|chrome|edge` and `--reuse-login` to `pilot` and `batch`; defaults remain `chromium` plus ephemeral mode. Reject `--reuse-login` with `chromium`, invalid combinations, unsafe output roots, or profile boundary failures before browser launch. Run reports may record only the browser enum and `session_mode=dedicated`, never the profile path or profile contents.
+
+- [ ] **Step 4: Prove reuse with local integration tests and run full gates**
+
+Use a temporary dedicated profile and a loopback page to prove a browser-managed login marker survives closing and reopening without production code reading cookies or storage state. Skip a real Chrome/Edge channel test only when that installed channel is unavailable. Re-run browser, runner, CLI, integration, collector, and agent suites plus Ruff, format, mypy strict, lock checks, builds, and diff checks.
+
+- [ ] **Step 5: Run supervised persistent-session pilots before batch**
+
+Use installed Chrome by default. Open one dedicated profile per platform, let the user log in, close it, then rerun the accepted Bilibili and Douyin videos with the same profile. Validate all three files, record whether counts improve, show the samples, and only then construct the accepted batch manifest. Do not open or copy the user's daily Chrome/Edge profile.
