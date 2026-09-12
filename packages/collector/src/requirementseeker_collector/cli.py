@@ -14,6 +14,7 @@ from .contracts import CollectionManifest
 from .runner import (
     BrowserVideoCollector,
     PilotRequest,
+    _path_is_safe_under,
     browser_profile_path,
     manifest_paths_are_safe,
     run_batch,
@@ -67,8 +68,15 @@ def _output_root(raw: object) -> Path | None:
         return None
     try:
         workspace = Path.cwd().resolve(strict=True)
-        boundary = (workspace / ".local-data" / "m2-real").resolve(strict=False)
-        candidate = Path(raw).resolve(strict=False)
+        lexical_boundary = (workspace / ".local-data" / "m2-real").absolute()
+        lexical_candidate = Path(raw).absolute()
+        lexical_relative = lexical_candidate.relative_to(lexical_boundary)
+        if any(not video_key_is_safe(part) for part in lexical_relative.parts):
+            return None
+        if not _path_is_safe_under(workspace, lexical_candidate):
+            return None
+        boundary = lexical_boundary.resolve(strict=False)
+        candidate = lexical_candidate.resolve(strict=False)
         boundary.relative_to(workspace)
         relative = candidate.relative_to(boundary)
     except (OSError, RuntimeError, ValueError):

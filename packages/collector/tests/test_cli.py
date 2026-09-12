@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -52,6 +54,26 @@ def manifest_item(platform: str, video_key: str) -> dict[str, str]:
         "direction": "software_tools",
         "comment_scale": "up_to_200",
     }
+
+
+def create_directory_redirect(link: Path, target: Path, kind: str) -> None:
+    target.mkdir(parents=True)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "junction":
+        if sys.platform != "win32":
+            pytest.skip("Windows junction test")
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        return
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink unavailable: {error}")
 
 
 def test_cli_rejects_source_url_credentials_without_echo(
@@ -409,6 +431,51 @@ def test_output_root_rejects_a_symbolic_link_escape(
         monkeypatch.setattr(Path, "resolve", resolve_escape)
 
     assert cli._output_root(".local-data/m2-real/escape") is None
+
+
+@pytest.mark.parametrize("command", ["pilot", "batch"])
+@pytest.mark.parametrize("link_kind", ["junction", "symlink"])
+def test_cli_rejects_same_boundary_output_redirect_before_browser_start(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    link_kind: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    boundary = tmp_path / ".local-data" / "m2-real"
+    target = boundary / "real-output"
+    link = boundary / "redirected-output"
+    create_directory_redirect(link, target, link_kind)
+    monkeypatch.setattr(
+        cli,
+        "BrowserVideoCollector",
+        lambda *args, **kwargs: pytest.fail("browser must not start"),
+    )
+    if command == "pilot":
+        arguments = [
+            "pilot",
+            "--platform",
+            "bilibili",
+            "--url",
+            "https://www.bilibili.com/video/BVfake",
+        ]
+    else:
+        manifest = tmp_path / "manifest.json"
+        write_manifest(manifest, [manifest_item("bilibili", "BVfake")])
+        arguments = ["batch", str(manifest)]
+    arguments.extend(
+        [
+            "--output-root",
+            str(link),
+            "--browser",
+            "chrome",
+            "--reuse-login",
+        ]
+    )
+
+    assert main(arguments) == 2
+    assert output(capsys)[1] == {"status": "invalid_request"}
 
 
 def test_cli_rejects_empty_output_root(
