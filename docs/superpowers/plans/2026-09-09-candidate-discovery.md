@@ -4,7 +4,7 @@
 
 **Goal:** 在原始采集器通过双平台试点后，交付可审计的 `rs-collect discover` 与 `validate-plan`，从显式公开入口生成候选清单并验证 24 视频覆盖要求。
 
-**Architecture:** 候选发现复用 `packages/collector` 的临时可见浏览器、挑战处理和平台响应边界，但使用独立候选适配器，不读取完整评论。候选清单是严格版本化文件；覆盖规划只报告缺口和确定性建议，不自动批准或调用批量采集。
+**Architecture:** 候选发现复用 `packages/collector` 的可见浏览器、挑战处理和平台响应边界，但使用独立候选适配器，不读取完整评论。默认保持临时 Chromium；真实发现可显式选择现有的 `--browser chrome|edge --reuse-login` 平台隔离专用 profile，不读取或导出其中的登录凭据。候选清单是严格版本化文件；覆盖规划只报告缺口和确定性建议，不自动批准或调用批量采集。
 
 **Tech Stack:** Python 3.12、Pydantic 2、Playwright Python、pytest、Ruff、mypy strict、uv。
 
@@ -190,7 +190,7 @@ Expected: discovery import fails.
 
 - [ ] **Step 3: Write minimal implementation**
 
-`DiscoveryRequest` requires exactly one of query or source URL, plus platform and direction. Open a visible ephemeral page through `BrowserSession`, collect supported candidate responses or metadata DOM rows, stop at requested page/result cap, deduplicate by `(platform, video_key)` while preserving first discovery, and write `candidates/<run-id>/manifest.json` plus `discovery.json` through safe audit utilities.
+`DiscoveryRequest` requires exactly one of query or source URL, plus platform and direction. Open a visible page through `BrowserSession`; default to ephemeral Chromium and allow only the existing explicit dedicated `chrome|edge + reuse_login` combinations. Collect supported candidate responses or metadata DOM rows, stop at requested page/result cap, deduplicate by `(platform, video_key)` while preserving first discovery, and write `candidates/<run-id>/manifest.json` plus `discovery.json` through safe audit utilities.
 
 ```python
 def deduplicate_candidates(items: Iterable[CandidateVideo]) -> list[CandidateVideo]:
@@ -302,7 +302,7 @@ Expected: commands are not registered.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Add `discover` with mutually exclusive required `--query`/`--source-url`, required platform/direction, and bounded `--max-results` default 50. Add `validate-plan PATH`; output ASCII summary JSON and return 0 only when coverage is complete. README shows candidate review as a distinct manual step before `batch`.
+Add `discover` with mutually exclusive required `--query`/`--source-url`, required platform/direction, bounded `--max-results` default 50, and the same validated `--browser`/`--reuse-login` options as `pilot`. Add `validate-plan PATH`; output ASCII summary JSON and return 0 only when coverage is complete. README shows candidate review as a distinct manual step before `batch`.
 
 - [ ] **Step 4: Run CLI and complete collector gate**
 
@@ -326,6 +326,8 @@ git commit -m "feat(collector): expose candidate discovery and coverage CLI"
 - [ ] **Step 1: Collect candidates from user-confirmed public queries or source pages**
 
 Run one headed `discover` command per confirmed platform/direction source. Record exact commands and outcomes in the local execution log; keep screenshots and discovery reports under `.local-data/`.
+
+The user-confirmed queries are `AI工具推荐`, `AI教程工作流`, `AI生活助手`, `AI娱乐创作`, and `AI电商营销`, mapped in order to the five required directions. Use the dedicated Chrome profile for each platform during real discovery.
 
 - [ ] **Step 2: Assemble a 24-video manifest from discovered candidates**
 
