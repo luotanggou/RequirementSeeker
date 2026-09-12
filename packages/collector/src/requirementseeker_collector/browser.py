@@ -79,8 +79,10 @@ class BrowserSession:
     ) -> None:
         self._stack.close()
         self._page = None
-        if self._cleanup_failed and exc_type is None:
-            raise BrowserSessionError("browser_cleanup_failed")
+        if exc_type is None:
+            self.raise_if_response_failed()
+            if self._cleanup_failed:
+                raise BrowserSessionError("browser_cleanup_failed")
 
     def open(
         self,

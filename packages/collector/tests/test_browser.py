@@ -91,6 +91,38 @@ def test_close_failure_does_not_prevent_other_cleanup():
     assert "secret-marker" not in str(caught.value)
 
 
+@pytest.mark.parametrize("cleanup_also_fails", [False, True])
+@pytest.mark.parametrize("failure_kind", ["shape", "processing"])
+def test_response_failure_arriving_during_page_close_has_priority(cleanup_also_fails, failure_kind):
+    fake = fake_playwright()
+    response = Mock(url="https://example.test/comments")
+    response.json.return_value = {"unexpected": []}
+    consumer = Mock()
+    expected_type = BrowserSessionError
+    expected_message = "response_processing_failed"
+    if failure_kind == "shape":
+        consumer.side_effect = ResponseShapeChanged("secret-marker")
+        expected_type = ResponseShapeChanged
+        expected_message = "response_shape_changed"
+    else:
+        response.json.side_effect = RuntimeError("secret-marker")
+
+    def close_page():
+        fake.events.append("page")
+        fake.page.on.call_args.args[1](response)
+        if cleanup_also_fails:
+            raise RuntimeError("cleanup-secret-marker")
+
+    fake.page.close.side_effect = close_page
+
+    with pytest.raises(expected_type) as caught:
+        with BrowserSession(fake.factory) as session:
+            session.open("https://example.test/video", Mock(), consumer)
+
+    assert_safe_exception(caught.value, expected_type, expected_message)
+    assert fake.events == ["page", "context", "browser", "playwright"]
+
+
 def test_body_failure_still_closes_all_resources():
     fake = fake_playwright()
     with pytest.raises(ValueError, match="caller_failure"):
@@ -127,14 +159,14 @@ def test_bad_response_json_has_safe_error():
     fake = fake_playwright()
     response = Mock(url="https://example.test/comments")
     response.json.side_effect = ValueError("secret-marker")
-    with BrowserSession(fake.factory) as session:
-        session.open("https://example.test/video", Mock(), Mock())
-        callback = fake.page.on.call_args.args[1]
-        callback(response)
-        with pytest.raises(BrowserSessionError) as caught:
+    with pytest.raises(BrowserSessionError) as caught:
+        with BrowserSession(fake.factory) as session:
+            session.open("https://example.test/video", Mock(), Mock())
+            callback = fake.page.on.call_args.args[1]
+            callback(response)
             session.raise_if_response_failed()
-        assert caught.value.__context__ is None
-        assert "secret-marker" not in str(caught.value)
+    assert caught.value.__context__ is None
+    assert "secret-marker" not in str(caught.value)
 
 
 def test_repeated_navigation_does_not_duplicate_consumers():

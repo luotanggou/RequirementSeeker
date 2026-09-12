@@ -15,6 +15,7 @@ from typing import cast
 import pytest
 
 import requirementseeker_collector.runner as runner
+from requirementseeker_collector.adapters.base import ResponseShapeChanged
 from requirementseeker_collector.artifacts import (
     ArtifactCommitError,
     read_jsonl,
@@ -1243,6 +1244,52 @@ def test_live_collector_does_not_invent_access_restriction_from_local_browser_er
     result = BrowserVideoCollector()._browse(request())
 
     assert result.status == expected_status
+
+
+def test_live_collector_teardown_response_failure_prevents_raw_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures/douyin/video.json").read_text(encoding="utf-8")
+    )
+
+    class FakePage:
+        def wait_for_timeout(self, milliseconds: float) -> None:
+            del milliseconds
+
+    class TeardownFailingSession:
+        page = FakePage()
+
+        def __enter__(self) -> TeardownFailingSession:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+            raise ResponseShapeChanged("response_shape_changed") from None
+
+        def open(self, url: str, adapter: object, consume: object) -> None:
+            del url, adapter
+            cast(Callable[[str, object], None], consume)(
+                "https://www.douyin.com/aweme/v1/web/aweme/detail", payload
+            )
+
+        def raise_if_response_failed(self) -> None:
+            pass
+
+    monkeypatch.setattr(runner, "BrowserSession", TeardownFailingSession)
+    monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready")).collect_pilot(
+        PilotRequest(
+            platform="douyin",
+            url="https://www.douyin.com/video/7390000000000000000",
+        ),
+        tmp_path,
+    )
+
+    assert result.status == "response_shape_changed"
+    assert not (tmp_path / "raw").exists()
+    assert "Traceback" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
