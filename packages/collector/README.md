@@ -1,9 +1,11 @@
 # RequirementSeeker Collector
 
-`rs-collect` collects public video comments from Bilibili and Douyin through a visible,
-ephemeral Chromium session. Login is completed by the user in that visible window; the
-collector does not persist the browser context, cookies, tokens, headers, passwords, or
-storage state.
+`rs-collect` collects public video comments from Bilibili and Douyin through a visible browser.
+The default is an ephemeral bundled Chromium session. An explicit `--browser chrome|edge
+--reuse-login` selection instead uses a dedicated profile under
+`.local-data/m2-real/browser-profiles/<platform>/<browser>/` so the browser can retain login
+state between runs. The collector never opens or copies a daily browser profile and does not
+read or export cookies, tokens, headers, passwords, storage state, or profile contents.
 
 All raw artifacts, temporary generations, challenge evidence, and run data stay local under
 the current workspace's `.local-data/m2-real` boundary. The CLI rejects output roots outside
@@ -50,6 +52,22 @@ uv run --project packages/collector rs-collect pilot \
   --url https://www.bilibili.com/video/BVexample \
   --video-key BVexample
 ```
+
+To opt into a dedicated installed-Chrome profile for that platform:
+
+```sh
+uv run --project packages/collector rs-collect pilot \
+  --platform bilibili \
+  --url https://www.bilibili.com/video/BVexample \
+  --browser chrome \
+  --reuse-login
+```
+
+`--browser chrome|edge` requires `--reuse-login`, and `--reuse-login` cannot be combined with
+the default `chromium`. Profile paths are fixed by the collector and rejected if they escape,
+redirect through a symlink/junction/reparse point, or overlap artifact, run, or challenge trees.
+Run reports contain only the browser enum and `ephemeral|dedicated` session mode, never a
+profile path.
 
 Run an approved version `1.0` manifest in file order:
 

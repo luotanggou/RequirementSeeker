@@ -108,6 +108,71 @@ def test_pilot_uses_default_local_output_root_and_emits_compact_summary(
     }
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--browser", "chrome"],
+        ["--browser", "edge"],
+        ["--browser", "chromium", "--reuse-login"],
+    ],
+)
+def test_cli_rejects_invalid_browser_mode_before_collector_creation(
+    arguments: list[str], capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "BrowserVideoCollector",
+        lambda *args, **kwargs: pytest.fail("collector must not be created"),
+    )
+
+    exit_code = main(
+        [
+            "pilot",
+            "--platform",
+            "bilibili",
+            "--url",
+            "https://www.bilibili.com/video/BVfake",
+            *arguments,
+        ]
+    )
+
+    assert exit_code == 2
+    assert output(capsys)[1] == {"status": "invalid_request"}
+
+
+def test_cli_wires_explicit_dedicated_browser_to_pilot(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake = FakeLiveCollector()
+    received: list[dict[str, object]] = []
+
+    def collector(**kwargs: object) -> FakeLiveCollector:
+        received.append(kwargs)
+        return fake
+
+    monkeypatch.setattr(cli, "BrowserVideoCollector", collector)
+
+    exit_code = main(
+        [
+            "pilot",
+            "--platform",
+            "bilibili",
+            "--url",
+            "https://www.bilibili.com/video/BVfake",
+            "--browser",
+            "chrome",
+            "--reuse-login",
+        ]
+    )
+
+    assert exit_code == 0
+    assert received == [{"browser": "chrome", "reuse_login": True}]
+    assert output(capsys)[1]["status"] == "success"
+
+
 def test_pilot_rejects_url_for_other_platform_without_opening_browser(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -224,6 +289,69 @@ def test_batch_processes_manifest_in_file_order_and_emits_platform_summary(
         "bilibili": {"status": "completed", "videos_succeeded": 1},
         "douyin": {"status": "completed", "videos_succeeded": 2},
     }
+
+
+def test_batch_wires_explicit_dedicated_browser(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "manifest.json"
+    write_manifest(path, [manifest_item("bilibili", "BV1")])
+    fake = FakeLiveCollector()
+    received: list[dict[str, object]] = []
+
+    def collector(**kwargs: object) -> FakeLiveCollector:
+        received.append(kwargs)
+        return fake
+
+    monkeypatch.setattr(cli, "BrowserVideoCollector", collector)
+
+    assert main(["batch", str(path), "--browser", "edge", "--reuse-login"]) == 0
+
+    assert received == [{"browser": "edge", "reuse_login": True}]
+    assert output(capsys)[1]["status"] == "success"
+
+
+def test_pilot_rejects_redirected_profile_before_collector_creation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    output_root = tmp_path / ".local-data" / "m2-real"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    profile_root = output_root / "browser-profiles"
+    profile_root.parent.mkdir(parents=True)
+    try:
+        profile_root.symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink unavailable: {error}")
+    monkeypatch.setattr(
+        cli,
+        "BrowserVideoCollector",
+        lambda *args, **kwargs: pytest.fail("collector must not be created"),
+    )
+
+    assert (
+        main(
+            [
+                "pilot",
+                "--platform",
+                "bilibili",
+                "--url",
+                "https://www.bilibili.com/video/BVfake",
+                "--browser",
+                "chrome",
+                "--reuse-login",
+            ]
+        )
+        == 2
+    )
+
+    assert output(capsys)[1] == {"status": "invalid_request"}
 
 
 @pytest.mark.parametrize(

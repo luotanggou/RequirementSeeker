@@ -1,5 +1,6 @@
 import re
 import traceback
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, PropertyMock
 
@@ -7,6 +8,7 @@ import pytest
 
 from requirementseeker_collector.adapters.base import ResponseShapeChanged
 from requirementseeker_collector.browser import (
+    BrowserLaunchConfig,
     BrowserSession,
     BrowserSessionError,
     perform_stratum_action,
@@ -54,6 +56,84 @@ def test_browser_launch_is_headed_and_not_persistent():
     fake.browser.new_context.assert_called_once_with()
     fake.runtime.chromium.launch_persistent_context.assert_not_called()
     assert fake.events == ["page", "context", "browser", "playwright"]
+
+
+@pytest.mark.parametrize(("browser", "channel"), [("chrome", "chrome"), ("edge", "msedge")])
+def test_dedicated_browser_uses_only_persistent_context(browser, channel, tmp_path):
+    fake = fake_playwright()
+    fake.runtime.chromium.launch_persistent_context.return_value = fake.context
+    config = BrowserLaunchConfig(browser=browser, output_root=tmp_path, platform="bilibili")
+
+    with BrowserSession(fake.factory, config) as session:
+        assert session.page is fake.page
+
+    fake.runtime.chromium.launch.assert_not_called()
+    fake.browser.new_context.assert_not_called()
+    fake.runtime.chromium.launch_persistent_context.assert_called_once_with(
+        user_data_dir=(tmp_path / "browser-profiles" / "bilibili" / browser).resolve(),
+        headless=False,
+        channel=channel,
+    )
+    fake.context.cookies.assert_not_called()
+    fake.context.storage_state.assert_not_called()
+    fake.context.set_extra_http_headers.assert_not_called()
+    assert fake.events == ["context", "playwright"]
+
+
+def test_persistent_browser_start_failure_has_safe_category(tmp_path):
+    fake = fake_playwright()
+    fake.runtime.chromium.launch_persistent_context.side_effect = RuntimeError(
+        "secret-profile-path"
+    )
+
+    with pytest.raises(BrowserSessionError) as caught:
+        with BrowserSession(
+            fake.factory,
+            BrowserLaunchConfig(browser="chrome", output_root=tmp_path, platform="bilibili"),
+        ):
+            pytest.fail("must not enter")
+
+    assert_safe_exception(caught.value, BrowserSessionError, "browser_profile_unavailable")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"browser": "chromium", "output_root": Path("root"), "platform": "bilibili"},
+        {"browser": "chrome"},
+        {"browser": "unsupported", "output_root": Path("root"), "platform": "bilibili"},
+    ],
+)
+def test_invalid_launch_config_is_rejected(kwargs):
+    with pytest.raises(ValueError, match="^invalid_browser_launch_config$"):
+        BrowserLaunchConfig(**kwargs)
+
+
+def test_launch_config_does_not_accept_an_arbitrary_profile_path() -> None:
+    with pytest.raises(TypeError):
+        BrowserLaunchConfig(browser="chrome", user_data_dir=Path("personal-profile"))
+
+
+def test_dedicated_profile_boundary_is_rechecked_immediately_before_launch(
+    tmp_path: Path,
+) -> None:
+    fake = fake_playwright()
+    output_root = tmp_path / "output"
+    config = BrowserLaunchConfig(browser="chrome", output_root=output_root, platform="bilibili")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    profile_root = output_root / "browser-profiles"
+    profile_root.parent.mkdir(parents=True)
+    try:
+        profile_root.symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlink unavailable: {error}")
+
+    with pytest.raises(BrowserSessionError, match="^browser_profile_unavailable$"):
+        with BrowserSession(fake.factory, config):
+            pytest.fail("must not enter")
+
+    fake.runtime.chromium.launch_persistent_context.assert_not_called()
 
 
 @pytest.mark.parametrize("stage", ["launch", "context", "page"])

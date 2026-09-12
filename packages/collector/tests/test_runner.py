@@ -35,6 +35,7 @@ from requirementseeker_collector.runner import (
     CliSupervisionGate,
     PilotRequest,
     PilotResult,
+    browser_profile_path,
     run_batch,
     run_pilot,
 )
@@ -179,6 +180,7 @@ def test_pilot_writes_safe_compact_run_report(tmp_path: Path) -> None:
     assert "https://" not in raw
     assert "\n" not in raw
     assert json.loads(raw) == {
+        "browser": "chromium",
         "collected_total": 2,
         "collection_finished_at": "2026-09-09T01:00:00+00:00",
         "collection_started_at": "2026-09-09T01:00:00+00:00",
@@ -187,6 +189,7 @@ def test_pilot_writes_safe_compact_run_report(tmp_path: Path) -> None:
         "pages_succeeded": 2,
         "platform": "bilibili",
         "run_version": "1.0",
+        "session_mode": "ephemeral",
         "status": "success",
         "target": 2,
         "video_key": "BVfake",
@@ -271,6 +274,103 @@ def test_pilot_rejects_unsafe_video_key_without_writing(tmp_path: Path, video_ke
 @pytest.mark.parametrize("video_key", ["", "two words", "unsafe\u0085key"])
 def test_shared_video_key_safety_rejects_empty_or_whitespace_segments(video_key: str) -> None:
     assert runner.video_key_is_safe(video_key) is False
+
+
+@pytest.mark.parametrize(("platform", "browser"), [("bilibili", "chrome"), ("douyin", "edge")])
+def test_dedicated_profile_path_is_fixed_and_platform_isolated(
+    tmp_path: Path, platform: str, browser: str
+) -> None:
+    output_root = tmp_path / "output"
+
+    assert (
+        browser_profile_path(output_root, platform, browser)
+        == (output_root / "browser-profiles" / platform / browser).resolve()
+    )
+
+
+@pytest.mark.parametrize(
+    ("platform", "browser"),
+    [("../raw", "chrome"), ("bilibili", "../raw"), ("unknown", "edge")],
+)
+def test_dedicated_profile_path_rejects_untrusted_segments(
+    tmp_path: Path, platform: str, browser: str
+) -> None:
+    assert browser_profile_path(tmp_path, platform, browser) is None
+
+
+@pytest.mark.parametrize(
+    ("browser", "reuse_login"),
+    [
+        ("chromium", True),
+        ("chrome", False),
+        ("edge", False),
+        ("unsupported", True),
+    ],
+)
+def test_collector_rejects_invalid_browser_modes(browser: str, reuse_login: bool) -> None:
+    with pytest.raises(ValueError, match="^invalid_browser_mode$"):
+        BrowserVideoCollector(browser=cast(runner.BrowserName, browser), reuse_login=reuse_login)
+
+
+@pytest.mark.parametrize("link_kind", ["junction", "symlink"])
+@pytest.mark.parametrize("redirect_part", ["browser-profiles", "bilibili", "chrome"])
+def test_dedicated_profile_path_rejects_redirects(
+    tmp_path: Path, redirect_part: str, link_kind: str
+) -> None:
+    output_root = tmp_path / "output"
+    outside = tmp_path / "outside"
+    current = output_root / "browser-profiles"
+    if redirect_part == "bilibili":
+        current /= "bilibili"
+    elif redirect_part == "chrome":
+        current = current / "bilibili" / "chrome"
+    create_directory_redirect(current, outside, link_kind)
+
+    assert browser_profile_path(output_root, "bilibili", "chrome") is None
+
+
+@pytest.mark.parametrize("link_kind", ["junction", "symlink"])
+@pytest.mark.parametrize("reserved_name", ["raw", ".staging", ".backup", "runs", "challenges"])
+def test_dedicated_profile_path_rejects_artifact_tree_overlap(
+    tmp_path: Path, link_kind: str, reserved_name: str
+) -> None:
+    output_root = tmp_path / "output"
+    reserved = output_root / reserved_name
+    create_directory_redirect(output_root / "browser-profiles", reserved, link_kind)
+
+    assert browser_profile_path(output_root, "bilibili", "chrome") is None
+
+
+def test_dedicated_run_report_contains_only_safe_session_enums(tmp_path: Path) -> None:
+    result = replace(browser_result(), browser="chrome", session_mode="dedicated")
+
+    run_pilot(request(), result, output_root=tmp_path)
+
+    raw = next((tmp_path / "runs").glob("*/run.json")).read_text(encoding="ascii")
+    report = json.loads(raw)
+    assert report["browser"] == "chrome"
+    assert report["session_mode"] == "dedicated"
+    assert "browser-profiles" not in raw
+    assert str(tmp_path) not in raw
+
+
+@pytest.mark.parametrize(
+    ("browser", "session_mode"),
+    [
+        ("C:/personal/profile", "dedicated"),
+        ("chrome", "ephemeral"),
+        ("chromium", "dedicated"),
+    ],
+)
+def test_browser_result_rejects_unsafe_session_audit_values(
+    browser: str, session_mode: str
+) -> None:
+    with pytest.raises(ValueError, match="^invalid_browser_session_audit$"):
+        replace(
+            browser_result(),
+            browser=cast(runner.BrowserName, browser),
+            session_mode=cast(runner.SessionMode, session_mode),
+        )
 
 
 def test_pilot_merges_previous_comments_and_records_identity_conflict(tmp_path: Path) -> None:
@@ -1430,6 +1530,32 @@ def test_supervision_ready_allows_supported_stratum_actions(
 
     assert result.status == "partial"
     assert actions == ["top", "recent", "replies", "long_tail"]
+
+
+def test_dedicated_collector_passes_fixed_profile_launch_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures/bilibili/video.json").read_text(encoding="utf-8")
+    )
+    received: list[object] = []
+
+    def browser_session(*, launch_config: object) -> SupervisedFakeSession:
+        received.append(launch_config)
+        return SupervisedFakeSession(payload)
+
+    monkeypatch.setattr(runner, "BrowserSession", browser_session)
+    monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
+
+    result = BrowserVideoCollector(
+        browser="chrome", reuse_login=True, supervisor=SequenceSupervisor("ready")
+    )._browse(request(), tmp_path)
+
+    assert result.browser == "chrome"
+    assert result.session_mode == "dedicated"
+    assert len(received) == 1
+    config = cast(runner.BrowserLaunchConfig, received[0])
+    assert config.user_data_dir == (tmp_path / "browser-profiles" / "bilibili" / "chrome").resolve()
 
 
 def test_explicit_challenge_action_uses_one_handler_attempt_and_rechecks_gate(

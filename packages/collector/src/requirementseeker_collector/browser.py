@@ -1,15 +1,19 @@
 """Ephemeral headed browsing and visible, deterministic page actions."""
 
+import os
 import re
+import stat
 from collections.abc import Callable
 from contextlib import ExitStack
+from dataclasses import dataclass
+from pathlib import Path
 from types import TracebackType
 from typing import Literal, Protocol, Self
 
 from playwright.sync_api import Page, Playwright, Response, sync_playwright
 
 from requirementseeker_collector.adapters.base import PlatformAdapter, ResponseShapeChanged
-from requirementseeker_collector.contracts import Stratum
+from requirementseeker_collector.contracts import Platform, Stratum
 
 
 class BrowserSessionError(RuntimeError):
@@ -20,11 +24,96 @@ class PlaywrightStarter(Protocol):
     def start(self) -> Playwright: ...
 
 
+type BrowserName = Literal["chromium", "chrome", "edge"]
+type SessionMode = Literal["ephemeral", "dedicated"]
+
+
+def _is_path_redirect(path: Path) -> bool:
+    if path.is_symlink() or path.is_junction():
+        return True
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except FileNotFoundError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def dedicated_profile_path(
+    output_root: Path, platform: Platform, browser: BrowserName
+) -> Path | None:
+    """Derive and validate the only profile path a dedicated session may open."""
+
+    if browser not in {"chrome", "edge"}:
+        return None
+    profile = output_root / "browser-profiles" / platform / browser
+    reserved = tuple(
+        output_root / name for name in ("raw", ".staging", ".backup", "runs", "challenges")
+    )
+    try:
+        lexical_root = Path(os.path.abspath(output_root))
+        lexical_profile = Path(os.path.abspath(profile))
+        relative = lexical_profile.relative_to(lexical_root)
+        current = lexical_root
+        if _is_path_redirect(current):
+            return None
+        for part in relative.parts:
+            current /= part
+            if _is_path_redirect(current):
+                return None
+        resolved_root = lexical_root.resolve(strict=False)
+        resolved_profile = lexical_profile.resolve(strict=False)
+        if not resolved_profile.is_relative_to(resolved_root):
+            return None
+        for path in reserved:
+            resolved_reserved = path.resolve(strict=False)
+            if resolved_profile.is_relative_to(
+                resolved_reserved
+            ) or resolved_reserved.is_relative_to(resolved_profile):
+                return None
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved_profile
+
+
+@dataclass(frozen=True)
+class BrowserLaunchConfig:
+    """Explicit browser selection without access to an existing personal profile."""
+
+    browser: BrowserName = "chromium"
+    output_root: Path | None = None
+    platform: Platform | None = None
+
+    def __post_init__(self) -> None:
+        valid = (
+            self.browser == "chromium" and self.output_root is None and self.platform is None
+        ) or (
+            self.browser in {"chrome", "edge"}
+            and self.output_root is not None
+            and self.platform is not None
+            and dedicated_profile_path(self.output_root, self.platform, self.browser) is not None
+        )
+        if not valid:
+            raise ValueError("invalid_browser_launch_config")
+
+    @property
+    def session_mode(self) -> SessionMode:
+        return "ephemeral" if self.browser == "chromium" else "dedicated"
+
+    @property
+    def user_data_dir(self) -> Path | None:
+        if self.output_root is None or self.platform is None:
+            return None
+        return dedicated_profile_path(self.output_root, self.platform, self.browser)
+
+
 class BrowserSession:
     def __init__(
-        self, playwright_factory: Callable[[], PlaywrightStarter] = sync_playwright
+        self,
+        playwright_factory: Callable[[], PlaywrightStarter] = sync_playwright,
+        launch_config: BrowserLaunchConfig | None = None,
     ) -> None:
         self._factory = playwright_factory
+        self._launch_config = launch_config or BrowserLaunchConfig()
         self._stack = ExitStack()
         self._cleanup_failed = False
         self._page: Page | None = None
@@ -55,12 +144,27 @@ class BrowserSession:
         try:
             runtime = self._factory().start()
             self._stack.callback(self._close, runtime.stop)
-            browser = runtime.chromium.launch(headless=False)
-            self._stack.callback(self._close, browser.close)
-            context = browser.new_context()
-            self._stack.callback(self._close, context.close)
-            self._page = context.new_page()
-            self._stack.callback(self._close, self._page.close)
+            if self._launch_config.session_mode == "dedicated":
+                user_data_dir = self._launch_config.user_data_dir
+                if user_data_dir is None:
+                    raise ValueError("dedicated_profile_required")
+                channel = "chrome" if self._launch_config.browser == "chrome" else "msedge"
+                context = runtime.chromium.launch_persistent_context(
+                    user_data_dir=user_data_dir,
+                    headless=False,
+                    channel=channel,
+                )
+                self._stack.callback(self._close, context.close)
+                self._page = context.new_page()
+            else:
+                if self._launch_config.user_data_dir is not None:
+                    raise ValueError("ephemeral_profile_forbidden")
+                browser = runtime.chromium.launch(headless=False)
+                self._stack.callback(self._close, browser.close)
+                context = browser.new_context()
+                self._stack.callback(self._close, context.close)
+                self._page = context.new_page()
+                self._stack.callback(self._close, self._page.close)
             started = True
         except Exception:
             pass
@@ -68,7 +172,12 @@ class BrowserSession:
             if not started:
                 self._stack.close()
         if not started:
-            raise BrowserSessionError("browser_start_failed")
+            category = (
+                "browser_profile_unavailable"
+                if self._launch_config.session_mode == "dedicated"
+                else "browser_start_failed"
+            )
+            raise BrowserSessionError(category)
         return self
 
     def __exit__(

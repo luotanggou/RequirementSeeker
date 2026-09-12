@@ -5,14 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Never
+from typing import Never, cast
 
 from pydantic import ValidationError
 
+from .browser import BrowserName
 from .contracts import CollectionManifest
 from .runner import (
     BrowserVideoCollector,
     PilotRequest,
+    browser_profile_path,
     manifest_paths_are_safe,
     run_batch,
     video_key_is_safe,
@@ -44,10 +46,14 @@ def _parser() -> argparse.ArgumentParser:
     pilot.add_argument("--url", required=True)
     pilot.add_argument("--video-key")
     pilot.add_argument("--output-root", default=".local-data/m2-real")
+    pilot.add_argument("--browser", choices=("chromium", "chrome", "edge"), default="chromium")
+    pilot.add_argument("--reuse-login", action="store_true")
 
     batch = commands.add_parser("batch", help="Collect a versioned manifest in file order")
     batch.add_argument("manifest")
     batch.add_argument("--output-root", default=".local-data/m2-real")
+    batch.add_argument("--browser", choices=("chromium", "chrome", "edge"), default="chromium")
+    batch.add_argument("--reuse-login", action="store_true")
     return parser
 
 
@@ -82,6 +88,18 @@ def _read_manifest(path: Path) -> CollectionManifest | None:
         return None
 
 
+def _browser_mode_is_valid(browser: str, reuse_login: bool) -> bool:
+    return (browser == "chromium" and not reuse_login) or (
+        browser in {"chrome", "edge"} and reuse_login
+    )
+
+
+def _collector(browser: str, reuse_login: bool) -> BrowserVideoCollector:
+    if browser == "chromium":
+        return BrowserVideoCollector()
+    return BrowserVideoCollector(browser=cast(BrowserName, browser), reuse_login=reuse_login)
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
@@ -91,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
 
     output_root = _output_root(args.output_root)
     if output_root is None:
+        _emit({"status": "invalid_request"})
+        return 2
+    if not _browser_mode_is_valid(args.browser, args.reuse_login):
         _emit({"status": "invalid_request"})
         return 2
 
@@ -105,8 +126,14 @@ def main(argv: list[str] | None = None) -> int:
         if request.video_key is not None and not video_key_is_safe(request.video_key):
             _emit({"status": "invalid_request"})
             return 2
+        if (
+            args.reuse_login
+            and browser_profile_path(output_root, request.platform, args.browser) is None
+        ):
+            _emit({"status": "invalid_request"})
+            return 2
         try:
-            result = BrowserVideoCollector().collect_pilot(request, output_root)
+            result = _collector(args.browser, args.reuse_login).collect_pilot(request, output_root)
         except Exception:
             _emit({"status": "collection_failed"})
             return 1
@@ -123,8 +150,14 @@ def main(argv: list[str] | None = None) -> int:
     if not manifest_paths_are_safe(manifest):
         _emit({"status": "manifest_invalid"})
         return 2
+    if args.reuse_login and any(
+        browser_profile_path(output_root, platform, args.browser) is None
+        for platform in {item.platform for item in manifest.videos}
+    ):
+        _emit({"status": "invalid_request"})
+        return 2
     try:
-        batch_result = run_batch(manifest, BrowserVideoCollector(), output_root)
+        batch_result = run_batch(manifest, _collector(args.browser, args.reuse_login), output_root)
     except Exception:
         _emit({"status": "collection_failed"})
         return 1

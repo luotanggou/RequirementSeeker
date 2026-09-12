@@ -21,7 +21,11 @@ from requirementseeker_collector.adapters import (
 )
 from requirementseeker_collector.adapters.base import PlatformAdapter, ResponseKind
 from requirementseeker_collector.artifacts import validate_generation
-from requirementseeker_collector.browser import BrowserSession
+from requirementseeker_collector.browser import (
+    BrowserLaunchConfig,
+    BrowserSession,
+    BrowserSessionError,
+)
 
 
 @dataclass
@@ -138,6 +142,25 @@ def test_page_flow_collects_response_and_dom_metadata(
     assert result.collection.pages_succeeded == 1
     assert local_site.comment_requests == ["supported"]
     assert validate_generation(tmp_path / "raw" / "bilibili" / "BV1synthetic")[0] == result.video
+
+
+def test_installed_chrome_reuses_browser_managed_profile(
+    local_site: LocalSite, tmp_path: Path
+) -> None:
+    config = BrowserLaunchConfig(browser="chrome", output_root=tmp_path, platform="bilibili")
+    try:
+        with BrowserSession(launch_config=config) as session:
+            session.page.goto(local_site.url)
+            session.page.evaluate("localStorage.setItem('synthetic-login', 'ready')")
+        with BrowserSession(launch_config=config) as session:
+            session.page.goto(local_site.url)
+            marker = session.page.evaluate("localStorage.getItem('synthetic-login')")
+    except BrowserSessionError as error:
+        if str(error) == "browser_profile_unavailable":
+            pytest.skip("installed Chrome channel unavailable")
+        raise
+
+    assert marker == "ready"
 
 
 def test_page_flow_records_unavailable_sort_and_keeps_actual_order(

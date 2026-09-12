@@ -38,7 +38,15 @@ from .artifacts import (
     validate_generation,
     write_generation,
 )
-from .browser import BrowserSession, BrowserSessionError, perform_stratum_action
+from .browser import (
+    BrowserLaunchConfig,
+    BrowserName,
+    BrowserSession,
+    BrowserSessionError,
+    SessionMode,
+    dedicated_profile_path,
+    perform_stratum_action,
+)
 from .challenges import ChallengeHandler, ClickAction, DragAction
 from .contracts import (
     CollectionError,
@@ -113,7 +121,7 @@ class PilotRequest(BaseModel):
 
 @dataclass(frozen=True)
 class BrowserResult:
-    """Safe normalized output from one ephemeral browser session."""
+    """Safe normalized output from one browser session."""
 
     video: RawVideo | None
     comments: list[RawComment]
@@ -125,6 +133,15 @@ class BrowserResult:
     collection_errors: list[CollectionError] = field(default_factory=list)
     status: str = "success"
     run_id: str | None = None
+    browser: BrowserName = "chromium"
+    session_mode: SessionMode = "ephemeral"
+
+    def __post_init__(self) -> None:
+        valid = (self.browser == "chromium" and self.session_mode == "ephemeral") or (
+            self.browser in {"chrome", "edge"} and self.session_mode == "dedicated"
+        )
+        if not valid:
+            raise ValueError("invalid_browser_session_audit")
 
 
 @dataclass(frozen=True)
@@ -266,6 +283,14 @@ def _paths_are_safe_under(output_root: Path, *targets: Path) -> bool:
     return all(_path_is_safe_under(output_root, target) for target in targets)
 
 
+def browser_profile_path(output_root: Path, platform: str, browser: str) -> Path | None:
+    """Return the fixed dedicated profile path when every boundary is safe."""
+
+    if platform not in _PLATFORM_HOSTS or browser not in {"chrome", "edge"}:
+        return None
+    return dedicated_profile_path(output_root, cast(Platform, platform), cast(BrowserName, browser))
+
+
 def manifest_paths_are_safe(manifest: CollectionManifest) -> bool:
     """Reject unsafe or case-insensitively colliding output directory keys."""
 
@@ -323,7 +348,9 @@ def _write_run_report(
                 "pages_requested": browser_result.pages_requested,
                 "pages_succeeded": browser_result.pages_succeeded,
                 "platform": result.platform,
+                "browser": browser_result.browser,
                 "run_version": "1.0",
+                "session_mode": browser_result.session_mode,
                 "status": result.status,
                 "target": result.target,
                 "video_key": result.video_key,
@@ -1155,7 +1182,7 @@ def collect_from_page(
 
 
 class BrowserVideoCollector:
-    """Collect supported response families in one headed, ephemeral browser session."""
+    """Collect supported response families in one headed browser session."""
 
     def __init__(
         self,
@@ -1165,12 +1192,21 @@ class BrowserVideoCollector:
         challenge_action: ChallengeAction | None = None,
         challenge_id: str = "supervised",
         challenge_confirm: Callable[[], bool] | None = None,
+        browser: BrowserName = "chromium",
+        reuse_login: bool = False,
     ) -> None:
+        if not (
+            (browser == "chromium" and not reuse_login)
+            or (browser in {"chrome", "edge"} and reuse_login)
+        ):
+            raise ValueError("invalid_browser_mode")
         self._supervisor = supervisor or CliSupervisionGate()
         self._supervision_timeout_seconds = supervision_timeout_seconds
         self._challenge_action = challenge_action
         self._challenge_id = challenge_id
         self._challenge_confirm = challenge_confirm
+        self._browser = browser
+        self._reuse_login = reuse_login
 
     def collect_pilot(self, request: PilotRequest, output_root: Path) -> PilotResult:
         run_id = uuid4().hex
@@ -1266,7 +1302,22 @@ class BrowserVideoCollector:
 
         status = "success"
         try:
-            with BrowserSession() as session:
+            launch_config: BrowserLaunchConfig | None = None
+            if self._reuse_login:
+                profile = browser_profile_path(output_root, request.platform, self._browser)
+                if profile is None:
+                    raise BrowserSessionError("browser_profile_unavailable")
+                launch_config = BrowserLaunchConfig(
+                    browser=self._browser,
+                    output_root=output_root,
+                    platform=request.platform,
+                )
+            browser_session = (
+                BrowserSession()
+                if launch_config is None
+                else BrowserSession(launch_config=launch_config)
+            )
+            with browser_session as session:
                 session.open(str(request.url), adapter, consume)
                 session.raise_if_response_failed()
                 establish_bilibili_fallback(session.page)
@@ -1343,4 +1394,6 @@ class BrowserVideoCollector:
             collection_errors=errors,
             status=status,
             run_id=run_id,
+            browser=self._browser,
+            session_mode="dedicated" if self._reuse_login else "ephemeral",
         )
