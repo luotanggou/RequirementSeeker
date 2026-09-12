@@ -288,7 +288,7 @@ def browser_profile_path(output_root: Path, platform: str, browser: str) -> Path
 
     if platform not in _PLATFORM_HOSTS or browser not in {"chrome", "edge"}:
         return None
-    return dedicated_profile_path(output_root, cast(Platform, platform), cast(BrowserName, browser))
+    return dedicated_profile_path(output_root, platform, cast(BrowserName, browser))
 
 
 def manifest_paths_are_safe(manifest: CollectionManifest) -> bool:
