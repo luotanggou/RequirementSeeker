@@ -117,7 +117,7 @@ def test_douyin_reply_response_uses_requested_parent() -> None:
                 "text": "Reply page item",
             }
         ],
-        "has_more": False,
+        "has_more": 0,
     }
 
     page = DouyinAdapter().parse_comment_response(
@@ -131,7 +131,7 @@ def test_douyin_reply_response_uses_requested_parent() -> None:
     assert page.comments[0].raw_parent_comment_id == "21"
 
 
-@pytest.mark.parametrize("has_more", [None, "1", 0, 1, 2, [], {}])
+@pytest.mark.parametrize("has_more", [None, "1", False, True, -1, 2, [], {}])
 def test_douyin_rejects_missing_or_invalid_pagination(has_more: object) -> None:
     payload: dict[str, Any] = {"status_code": 0, "comments": []}
     if has_more is not None:
@@ -146,7 +146,7 @@ def test_douyin_requires_usable_cursor_when_more_pages_exist(cursor: object) -> 
     payload = {
         "status_code": 0,
         "comments": [],
-        "has_more": True,
+        "has_more": 1,
         "cursor": cursor,
     }
 
@@ -164,7 +164,7 @@ def test_douyin_invalid_sec_uid_falls_back_to_valid_uid() -> None:
                 "text": "Artificial fallback comment",
             }
         ],
-        "has_more": False,
+        "has_more": 0,
     }
 
     page = DouyinAdapter().parse_comment_response(payload, "top", 1, video_author_id="42")

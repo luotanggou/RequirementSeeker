@@ -914,6 +914,9 @@ def test_live_collector_buffers_supported_comments_that_arrive_before_video_meta
             )
             callback("https://api.bilibili.com/x/web-interface/view", video_payload)
 
+        def raise_if_response_failed(self) -> None:
+            pass
+
     monkeypatch.setattr(runner, "BrowserSession", FakeSession)
     monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
 
@@ -983,6 +986,9 @@ def test_live_bilibili_collector_falls_back_to_standard_page_metadata(
                 "https://api.bilibili.com/x/v2/reply/wbi/main",
                 comments_payload,
             )
+
+        def raise_if_response_failed(self) -> None:
+            pass
 
     monkeypatch.setattr(runner, "BrowserSession", CommentOnlySession)
     monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
@@ -1074,6 +1080,9 @@ def test_live_bilibili_metadata_fallback_fails_closed_without_consistent_context
                 "https://api.bilibili.com/x/v2/reply/wbi/main", payload
             )
 
+        def raise_if_response_failed(self) -> None:
+            pass
+
     monkeypatch.setattr(runner, "BrowserSession", CommentOnlySession)
     monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
 
@@ -1116,6 +1125,9 @@ def test_live_bilibili_metadata_fallback_rejects_inconsistent_comment_contexts(
             callback = cast(Callable[[str, object], None], consume)
             callback("https://api.bilibili.com/x/v2/reply/wbi/main", payload)
             callback("https://api.bilibili.com/x/v2/reply/wbi/main", conflicting)
+
+        def raise_if_response_failed(self) -> None:
+            pass
 
     monkeypatch.setattr(runner, "BrowserSession", InconsistentSession)
 
@@ -1168,6 +1180,9 @@ def test_live_bilibili_metadata_fallback_rejects_later_inconsistent_video_respon
             callback = cast(Callable[[str, object], None], consume)
             callback("https://api.bilibili.com/x/v2/reply/wbi/main", comments_payload)
             callback("https://api.bilibili.com/x/web-interface/view", video_payload)
+
+        def raise_if_response_failed(self) -> None:
+            pass
 
     monkeypatch.setattr(runner, "BrowserSession", InconsistentSession)
 
@@ -1316,6 +1331,9 @@ class SupervisedFakeSession:
         del url, adapter
         callback = cast(Callable[[str, object], None], consume)
         callback("https://api.bilibili.com/x/web-interface/view", self.video_payload)
+
+    def raise_if_response_failed(self) -> None:
+        pass
 
 
 @pytest.mark.parametrize(

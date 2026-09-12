@@ -3,18 +3,25 @@ from __future__ import annotations
 import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import cast
 from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
 from requirementseeker_collector import runner
-from requirementseeker_collector.adapters import BilibiliAdapter, ResponseShapeChanged
+from requirementseeker_collector.adapters import (
+    BilibiliAdapter,
+    DouyinAdapter,
+    ResponseShapeChanged,
+)
+from requirementseeker_collector.adapters.base import PlatformAdapter, ResponseKind
 from requirementseeker_collector.artifacts import validate_generation
+from requirementseeker_collector.browser import BrowserSession
 
 
 @dataclass
@@ -31,6 +38,9 @@ def serve_site(mode: str = "supported") -> Iterator[LocalSite]:
     page = (Path(__file__).parent / "site" / "index.html").read_bytes()
     comment_payload = (
         Path(__file__).parents[1] / "fixtures" / "bilibili" / "comments.json"
+    ).read_bytes()
+    douyin_video_payload = (
+        Path(__file__).parents[1] / "fixtures" / "douyin" / "video.json"
     ).read_bytes()
     comment_requests: list[str] = []
     websocket_requests: list[str] = []
@@ -55,6 +65,12 @@ def serve_site(mode: str = "supported") -> Iterator[LocalSite]:
                     self.end_headers()
                     self.wfile.write(body)
                     return
+            elif parsed.path == "/aweme/v1/web/aweme/detail":
+                body = douyin_video_payload
+                content_type = "application/json"
+            elif parsed.path == "/aweme/v1/web/comment/list":
+                body = b'{"status_code":0,"comments":[],"has_more":2,"cursor":0}'
+                content_type = "application/json"
             elif parsed.path == "/socket":
                 websocket_requests.append(parsed.path)
                 self.send_error(400)
@@ -163,6 +179,51 @@ def test_delayed_unknown_response_cannot_race_end_marker_into_commit(tmp_path: P
             )
 
     assert not (tmp_path / "raw").exists()
+
+
+@pytest.mark.parametrize("mode", ["douyin-invalid", "douyin-delayed-invalid"])
+def test_live_collector_surfaces_async_comment_shape_failure_without_commit_or_traceback(
+    mode: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with serve_site(mode) as site:
+        adapter = DouyinAdapter()
+
+        class LocalResponseAdapter:
+            def response_kind(self, url: str) -> ResponseKind | None:
+                path = urlsplit(url).path
+                return adapter.response_kind(f"https://www.douyin.com{path}")
+
+        class LocalBrowserSession(BrowserSession):
+            def open(self, url: str, received_adapter: object, consume: object) -> None:
+                del url, received_adapter
+                callback = cast(Callable[[str, object], None], consume)
+
+                def forward(local_url: str, payload: object) -> None:
+                    path = urlsplit(local_url).path
+                    callback(f"https://www.douyin.com{path}", payload)
+
+                super().open(site.url, cast(PlatformAdapter, LocalResponseAdapter()), forward)
+
+        monkeypatch.setattr(runner, "BrowserSession", LocalBrowserSession)
+        monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "performed")
+        result = runner.BrowserVideoCollector(
+            supervisor=runner.CliSupervisionGate(
+                read_status=lambda timeout: "ready", write_prompt=lambda prompt: None
+            )
+        ).collect_pilot(
+            runner.PilotRequest(
+                platform="douyin",
+                url="https://www.douyin.com/video/7390000000000000000",
+            ),
+            tmp_path,
+        )
+
+    assert result.status == "response_shape_changed"
+    assert not (tmp_path / "raw").exists()
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_response_started_during_navigation_is_not_lost(tmp_path: Path) -> None:

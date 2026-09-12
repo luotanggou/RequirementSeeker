@@ -29,6 +29,8 @@ class BrowserSession:
         self._cleanup_failed = False
         self._page: Page | None = None
         self._response_callback: Callable[[Response], None] | None = None
+        self._response_shape_changed = False
+        self._response_processing_failed = False
 
     @property
     def page(self) -> Page:
@@ -41,6 +43,12 @@ class BrowserSession:
             close()
         except Exception:
             self._cleanup_failed = True
+
+    def raise_if_response_failed(self) -> None:
+        if self._response_shape_changed:
+            raise ResponseShapeChanged("response_shape_changed") from None
+        if self._response_processing_failed:
+            raise BrowserSessionError("response_processing_failed") from None
 
     def __enter__(self) -> Self:
         started = False
@@ -81,27 +89,21 @@ class BrowserSession:
         consume: Callable[[str, object], None],
     ) -> None:
         def on_response(response: Response) -> None:
-            failed = False
-            shape_changed = False
             try:
                 response_url = response.url
                 try:
                     response_kind = adapter.response_kind(response_url)
                 except ResponseShapeChanged:
                     response_kind = None
-                    shape_changed = True
+                    self._response_shape_changed = True
                 if response_kind is not None:
                     payload = response.json()
                     try:
                         consume(response_url, payload)
                     except ResponseShapeChanged:
-                        shape_changed = True
+                        self._response_shape_changed = True
             except Exception:
-                failed = True
-            if shape_changed:
-                raise ResponseShapeChanged("response_shape_changed")
-            if failed:
-                raise BrowserSessionError("response_processing_failed")
+                self._response_processing_failed = True
 
         page = self.page
         navigated = False
@@ -124,6 +126,7 @@ class BrowserSession:
             raise ResponseShapeChanged("response_shape_changed")
         if response_failed:
             raise BrowserSessionError("response_processing_failed")
+        self.raise_if_response_failed()
         if not navigated:
             raise BrowserSessionError("browser_navigation_failed")
 

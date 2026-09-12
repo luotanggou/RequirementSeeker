@@ -130,8 +130,9 @@ def test_bad_response_json_has_safe_error():
     with BrowserSession(fake.factory) as session:
         session.open("https://example.test/video", Mock(), Mock())
         callback = fake.page.on.call_args.args[1]
+        callback(response)
         with pytest.raises(BrowserSessionError) as caught:
-            callback(response)
+            session.raise_if_response_failed()
         assert caught.value.__context__ is None
         assert "secret-marker" not in str(caught.value)
 
@@ -201,6 +202,7 @@ def test_response_processing_failure_has_safe_error(stage, timing):
             session.open("https://example.test/video", adapter, consumer)
             if timing == "after_open":
                 fake.page.on.call_args.args[1](response)
+                session.raise_if_response_failed()
 
     assert_safe_exception(caught.value, BrowserSessionError, "response_processing_failed")
 
@@ -228,6 +230,7 @@ def test_adapter_shape_failure_has_fixed_category(stage, timing):
             session.open("https://example.test/video", adapter, consumer)
             if timing == "after_open":
                 fake.page.on.call_args.args[1](response)
+                session.raise_if_response_failed()
 
     assert_safe_exception(caught.value, ResponseShapeChanged, "response_shape_changed")
 

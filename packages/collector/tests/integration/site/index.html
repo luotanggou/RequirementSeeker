@@ -29,6 +29,16 @@
         document.querySelector("#recent").remove();
       }
       let requested = false;
+      if (mode === "douyin-invalid" || mode === "douyin-delayed-invalid") {
+        fetch("/aweme/v1/web/aweme/detail").then(() => {
+          const requestInvalid = () => fetch("/aweme/v1/web/comment/list");
+          if (mode === "douyin-delayed-invalid") {
+            window.setTimeout(requestInvalid, 250);
+          } else {
+            requestInvalid();
+          }
+        });
+      }
       async function requestComments() {
         if (requested) return;
         requested = true;

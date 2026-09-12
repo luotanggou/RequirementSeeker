@@ -108,9 +108,9 @@ class DouyinAdapter:
                 for value in sequence(payload.get("comments"))
             ]
             has_more_value = payload.get("has_more")
-            if type(has_more_value) is not bool:
+            if type(has_more_value) is not int or has_more_value not in {0, 1}:
                 raise ResponseShapeChanged("response_shape_changed")
-            has_more = has_more_value
+            has_more = has_more_value == 1
             next_cursor = optional_identifier(payload.get("cursor"))
             if has_more and next_cursor is None:
                 raise ResponseShapeChanged("response_shape_changed")

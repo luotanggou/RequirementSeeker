@@ -1268,10 +1268,12 @@ class BrowserVideoCollector:
         try:
             with BrowserSession() as session:
                 session.open(str(request.url), adapter, consume)
+                session.raise_if_response_failed()
                 establish_bilibili_fallback(session.page)
                 supervision_status = self._supervisor.wait_for_ready(
                     session.page, self._supervision_timeout_seconds
                 )
+                session.raise_if_response_failed()
                 establish_bilibili_fallback(session.page)
                 if supervision_status != "ready":
                     status = supervision_status
@@ -1293,21 +1295,27 @@ class BrowserVideoCollector:
                                 )
                             )
                             challenge = handler.attempt(session.page, self._challenge_action)
+                            session.raise_if_response_failed()
                             if challenge.status != "attempted":
                                 status = "challenge_unresolved"
                             else:
                                 status = self._supervisor.wait_for_ready(
                                     session.page, self._supervision_timeout_seconds
                                 )
+                                session.raise_if_response_failed()
                 if status == "success" or status == "ready":
                     status = "success"
                     for stratum in _STRATA:
                         current_stratum = stratum
-                        if perform_stratum_action(session.page, stratum) == "performed":
+                        action_status = perform_stratum_action(session.page, stratum)
+                        session.raise_if_response_failed()
+                        if action_status == "performed":
                             sort_modes.append(stratum)
                             session.page.wait_for_timeout(750)
+                            session.raise_if_response_failed()
                             establish_bilibili_fallback(session.page)
                     establish_bilibili_fallback(session.page)
+                session.raise_if_response_failed()
         except ResponseShapeChanged:
             status = "response_shape_changed"
         except BrowserSessionError as error:
