@@ -725,7 +725,7 @@ Store only artificial field-compatible values in the tracked fixture. Keep the r
 
 Expected: schema-valid `video.json`, `comments.jsonl`, `collection.json`, plus local run audit.
 
-- [ ] **Step 4: Repeat Steps 1–3 for one user-confirmed public Douyin URL**
+- [x] **Step 4: Repeat Steps 1–3 for one user-confirmed public Douyin URL**
 
 Construct the same command with `--platform douyin` and the exact URL from the active user response; keep the full URL out of tracked files.
 
