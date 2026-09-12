@@ -149,10 +149,14 @@ def perform_stratum_action(page: Page, stratum: Stratum) -> Literal["performed",
             label = re.compile(patterns[stratum])
             for role in ("button", "tab", "link"):
                 for control in page.get_by_role(role, name=label).all():
-                    if control.is_visible():
+                    try:
+                        if not control.is_visible():
+                            continue
                         control.click()
-                        result = "performed"
-                        break
+                    except Exception:
+                        continue
+                    result = "performed"
+                    break
                 if result == "performed":
                     break
     except Exception:

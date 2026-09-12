@@ -303,6 +303,40 @@ def test_missing_or_hidden_control_is_unavailable():
     page.locator.assert_not_called()
 
 
+@pytest.mark.parametrize("failed_stage", ["is_visible", "click"])
+def test_stale_matching_control_does_not_hide_a_later_actionable_control(failed_stage):
+    page = Mock()
+    stale = Mock()
+    actionable = Mock()
+    stale.is_visible.return_value = True
+    actionable.is_visible.return_value = True
+    if failed_stage == "is_visible":
+        stale.is_visible.side_effect = RuntimeError("stale-secret-marker")
+    else:
+        stale.click.side_effect = RuntimeError("stale-secret-marker")
+    page.get_by_role.return_value.all.return_value = [stale, actionable]
+
+    assert perform_stratum_action(page, "replies") == "performed"
+
+    actionable.click.assert_called_once_with()
+
+
+def test_all_stale_or_hidden_matching_controls_are_unavailable():
+    page = Mock()
+    stale_visibility = Mock()
+    stale_visibility.is_visible.side_effect = RuntimeError("stale-secret-marker")
+    stale_click = Mock()
+    stale_click.is_visible.return_value = True
+    stale_click.click.side_effect = RuntimeError("stale-secret-marker")
+    hidden = Mock()
+    hidden.is_visible.return_value = False
+    page.get_by_role.return_value.all.return_value = [stale_visibility, stale_click, hidden]
+
+    assert perform_stratum_action(page, "replies") == "unavailable"
+
+    hidden.click.assert_not_called()
+
+
 def test_long_tail_advances_scroll_order():
     page = Mock()
     assert perform_stratum_action(page, "long_tail") == "performed"
@@ -310,7 +344,7 @@ def test_long_tail_advances_scroll_order():
     page.get_by_role.assert_not_called()
 
 
-@pytest.mark.parametrize("stage", ["get_by_role", "all", "is_visible", "click", "wheel"])
+@pytest.mark.parametrize("stage", ["get_by_role", "all", "wheel"])
 def test_stratum_action_failure_has_safe_error(stage):
     page = Mock()
     control = Mock()
@@ -321,10 +355,6 @@ def test_stratum_action_failure_has_safe_error(stage):
         page.get_by_role.side_effect = RuntimeError("secret-marker")
     elif stage == "all":
         page.get_by_role.return_value.all.side_effect = RuntimeError("secret-marker")
-    elif stage == "is_visible":
-        control.is_visible.side_effect = RuntimeError("secret-marker")
-    elif stage == "click":
-        control.click.side_effect = RuntimeError("secret-marker")
     else:
         page.mouse.wheel.side_effect = RuntimeError("secret-marker")
 
