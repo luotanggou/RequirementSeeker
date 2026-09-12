@@ -30,6 +30,14 @@ The response parser recognizes only these six current response families:
 - Douyin `/aweme/v1/web/comment/list`
 - Douyin `/aweme/v1/web/comment/list/reply`
 
+Pagination is driven only by visible page controls and fixed-distance scrolling; the collector
+does not construct or replay platform API requests. After the initial sort-mode pass, each round
+performs at most one visible reply expansion and one fixed scroll, then waits for response
+processing. Progress is the number of unique comment IDs, while duplicate responses remain in
+the current run for conflict validation. Collection stops at the target, explicit exhaustion,
+three consecutive rounds without a new ID, or 100 rounds. The last two conditions return a
+partial result with `pagination_stalled` or `pagination_round_limit` in the local audit record.
+
 Run the offline Playwright gate against the checked-in synthetic loopback page:
 
 ```sh

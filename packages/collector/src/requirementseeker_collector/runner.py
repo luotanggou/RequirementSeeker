@@ -72,6 +72,7 @@ _PLATFORM_HOSTS: dict[Platform, tuple[str, ...]] = {
     "douyin": ("douyin.com", "iesdouyin.com"),
 }
 _STRATA: tuple[Stratum, ...] = ("top", "recent", "replies", "long_tail")
+_PAGINATION_STRATA: tuple[Stratum, ...] = ("replies", "long_tail")
 _WINDOWS_DEVICE_NAMES = frozenset(
     {"con", "prn", "aux", "nul"}
     | {f"com{number}" for number in range(1, 10)}
@@ -84,6 +85,8 @@ _REPORT_ERROR_CATEGORIES = frozenset(
         "interrupted_commit_recovered",
         "merge_conflict",
         "no_comments_collected",
+        "pagination_round_limit",
+        "pagination_stalled",
         "reported_total_unavailable",
     }
 )
@@ -1237,8 +1240,11 @@ class BrowserVideoCollector:
         pages_requested = 0
         pages_succeeded = 0
         sort_modes: list[Stratum] = []
+        performed_strata: set[Stratum] = set()
         current_stratum: Stratum = "top"
         ranks: dict[Stratum, int] = {stratum: 1 for stratum in _STRATA}
+        latest_pages: dict[Stratum, tuple[bool, str | None]] = {}
+        unique_comment_ids: set[str] = set()
         pending: list[tuple[Mapping[str, object], Stratum]] = []
         comment_context: BilibiliCommentContext | None = None
 
@@ -1252,6 +1258,8 @@ class BrowserVideoCollector:
                 video_author_id=video.raw_author_id,
             )
             comments.extend(parsed.comments)
+            unique_comment_ids.update(comment.raw_comment_id for comment in parsed.comments)
+            latest_pages[stratum] = (parsed.has_more, parsed.next_cursor)
             pages_succeeded += 1
             ranks[stratum] += 1
             if stratum not in sort_modes:
@@ -1299,6 +1307,12 @@ class BrowserVideoCollector:
             while pending:
                 pending_payload, pending_stratum = pending.pop(0)
                 parse_comments(pending_payload, pending_stratum)
+
+        def explicitly_exhausted() -> bool:
+            return bool(performed_strata) and all(
+                stratum in latest_pages and not latest_pages[stratum][0]
+                for stratum in performed_strata
+            )
 
         status = "success"
         try:
@@ -1361,11 +1375,55 @@ class BrowserVideoCollector:
                         action_status = perform_stratum_action(session.page, stratum)
                         session.raise_if_response_failed()
                         if action_status == "performed":
+                            performed_strata.add(stratum)
                             sort_modes.append(stratum)
-                            session.page.wait_for_timeout(750)
-                            session.raise_if_response_failed()
+                            session.wait_for_response_processing()
                             establish_bilibili_fallback(session.page)
                     establish_bilibili_fallback(session.page)
+                    if video is not None and latest_pages:
+                        target = collection_target(video.total_comment_count).target
+                        no_progress_rounds = 0
+                        for round_number in range(1, 101):
+                            if len(unique_comment_ids) >= target:
+                                break
+                            if explicitly_exhausted():
+                                status = "partial"
+                                break
+                            before = len(unique_comment_ids)
+                            for stratum in _PAGINATION_STRATA:
+                                current_stratum = stratum
+                                action_status = perform_stratum_action(session.page, stratum)
+                                session.raise_if_response_failed()
+                                if action_status == "performed":
+                                    performed_strata.add(stratum)
+                                    if stratum not in sort_modes:
+                                        sort_modes.append(stratum)
+                                    session.wait_for_response_processing()
+                                    establish_bilibili_fallback(session.page)
+                                    if len(unique_comment_ids) >= target:
+                                        break
+                                    if explicitly_exhausted():
+                                        break
+                            if len(unique_comment_ids) == before:
+                                no_progress_rounds += 1
+                            else:
+                                no_progress_rounds = 0
+                            if len(unique_comment_ids) >= target:
+                                break
+                            if explicitly_exhausted():
+                                status = "partial"
+                                break
+                            if no_progress_rounds == 3:
+                                status = "partial"
+                                errors.append(
+                                    _collection_error("pagination_stalled", datetime.now(UTC))
+                                )
+                                break
+                            if round_number == 100:
+                                status = "partial"
+                                errors.append(
+                                    _collection_error("pagination_round_limit", datetime.now(UTC))
+                                )
                 session.raise_if_response_failed()
         except ResponseShapeChanged:
             status = "response_shape_changed"

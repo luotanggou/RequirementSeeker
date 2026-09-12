@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -40,12 +41,59 @@ class LocalSite:
 @contextmanager
 def serve_site(mode: str = "supported") -> Iterator[LocalSite]:
     page = (Path(__file__).parent / "site" / "index.html").read_bytes()
+    if mode.startswith("paginated-douyin"):
+        page = (
+            page.replace(
+                b'<button type="button" data-rs-stratum="top">Popular</button>',
+                b'<button id="top" type="button" data-rs-stratum="top">'
+                b"\xe6\x9c\x80\xe7\x83\xad</button>",
+            )
+            .replace(
+                b'<button id="recent" type="button" data-rs-stratum="recent">Recent</button>',
+                b'<button id="recent" type="button" data-rs-stratum="recent">'
+                b"\xe6\x9c\x80\xe6\x96\xb0</button>",
+            )
+            .replace(
+                b'<button type="button" data-rs-stratum="replies">Replies</button>',
+                b'<button id="replies" type="button" data-rs-stratum="replies">'
+                b"\xe5\xb1\x95\xe5\xbc\x801\xe6\x9d\xa1\xe5\x9b\x9e\xe5\xa4\x8d</button>",
+            )
+            .replace(
+                b'window.addEventListener("scroll", requestComments);',
+                b"""
+              let paginationPage = 0;
+              let paginationBusy = false;
+              async function requestDouyinPage() {
+                if (paginationBusy || paginationPage >= 6) return;
+                paginationBusy = true;
+                paginationPage += 1;
+                try {
+                  await fetch(`/aweme/v1/web/comment/list?page=${paginationPage}`);
+                } finally {
+                  paginationBusy = false;
+                }
+              }
+              fetch("/aweme/v1/web/aweme/detail");
+              document.querySelector("#top").addEventListener("click", requestDouyinPage);
+              document.querySelector("#recent").addEventListener("click", requestDouyinPage);
+              document.querySelector("#replies").addEventListener("click", requestDouyinPage);
+              window.addEventListener("scroll", requestDouyinPage);
+            """,
+            )
+        )
+        pagination_limit = 10 if mode == "paginated-douyin-stalled" else 6
+        page = page.replace(
+            b"paginationPage >= 6", f"paginationPage >= {pagination_limit}".encode()
+        )
     comment_payload = (
         Path(__file__).parents[1] / "fixtures" / "bilibili" / "comments.json"
     ).read_bytes()
     douyin_video_payload = (
         Path(__file__).parents[1] / "fixtures" / "douyin" / "video.json"
     ).read_bytes()
+    paginated_video = json.loads(douyin_video_payload)
+    paginated_video["aweme_detail"]["statistics"]["comment_count"] = 3
+    paginated_video_payload = json.dumps(paginated_video).encode("utf-8")
     comment_requests: list[str] = []
     websocket_requests: list[str] = []
 
@@ -70,10 +118,56 @@ def serve_site(mode: str = "supported") -> Iterator[LocalSite]:
                     self.wfile.write(body)
                     return
             elif parsed.path == "/aweme/v1/web/aweme/detail":
-                body = douyin_video_payload
+                body = (
+                    paginated_video_payload
+                    if mode.startswith("paginated-douyin")
+                    else douyin_video_payload
+                )
                 content_type = "application/json"
             elif parsed.path == "/aweme/v1/web/comment/list":
-                body = b'{"status_code":0,"comments":[],"has_more":2,"cursor":0}'
+                if mode.startswith("paginated-douyin"):
+                    page_number = parse_qs(parsed.query).get("page", [""])[0]
+                    comment_requests.append(page_number)
+                    if mode == "paginated-douyin-stalled":
+                        identifiers = [21]
+                    else:
+                        identifiers = {
+                            "1": [21],
+                            "2": [21],
+                            "3": [22],
+                            "4": [22],
+                            "5": [23] if mode == "paginated-douyin-slow" else [22],
+                            "6": [23],
+                        }.get(page_number, [])
+                    payload: dict[str, object] = {
+                        "status_code": 0,
+                        "comments": [
+                            {
+                                "cid": str(identifier),
+                                "user": {"uid": "viewer"},
+                                "text": f"comment {identifier}",
+                                "create_time": 1789000000 + identifier,
+                                "digg_count": 0,
+                                "reply_comment_total": 0,
+                            }
+                            for identifier in identifiers
+                        ],
+                        "has_more": (
+                            0
+                            if page_number == "6"
+                            and mode not in {"paginated-douyin-slow", "paginated-douyin-stalled"}
+                            else 1
+                        ),
+                        "cursor": int(page_number),
+                    }
+                    if mode == "paginated-douyin-slow" and page_number == "5":
+                        time.sleep(1.0)
+                    if mode == "paginated-douyin-late-invalid" and page_number == "6":
+                        time.sleep(1.0)
+                        payload = {"status_code": 0, "unknown": []}
+                    body = json.dumps(payload).encode("utf-8")
+                else:
+                    body = b'{"status_code":0,"comments":[],"has_more":2,"cursor":0}'
                 content_type = "application/json"
             elif parsed.path == "/socket":
                 websocket_requests.append(parsed.path)
@@ -247,6 +341,147 @@ def test_live_collector_surfaces_async_comment_shape_failure_without_commit_or_t
     assert result.status == "response_shape_changed"
     assert not (tmp_path / "raw").exists()
     assert "Traceback" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_status"),
+    [
+        ("paginated-douyin", "success"),
+        ("paginated-douyin-late-invalid", "response_shape_changed"),
+    ],
+)
+def test_live_collector_uses_bounded_visible_pagination_on_local_chromium(
+    mode: str,
+    expected_status: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with serve_site(mode) as site:
+        adapter = DouyinAdapter()
+
+        class LocalResponseAdapter:
+            def response_kind(self, url: str) -> ResponseKind | None:
+                path = urlsplit(url).path
+                return adapter.response_kind(f"https://www.douyin.com{path}")
+
+        class LocalBrowserSession(BrowserSession):
+            def open(self, url: str, received_adapter: object, consume: object) -> None:
+                del url, received_adapter
+                callback = cast(Callable[[str, object], None], consume)
+
+                def forward(local_url: str, payload: object) -> None:
+                    path = urlsplit(local_url).path
+                    callback(f"https://www.douyin.com{path}", payload)
+
+                super().open(site.url, cast(PlatformAdapter, LocalResponseAdapter()), forward)
+
+        monkeypatch.setattr(runner, "BrowserSession", LocalBrowserSession)
+        result = runner.BrowserVideoCollector(
+            supervisor=runner.CliSupervisionGate(
+                read_status=lambda timeout: "ready", write_prompt=lambda prompt: None
+            )
+        ).collect_pilot(
+            runner.PilotRequest(
+                platform="douyin",
+                url="https://www.douyin.com/video/7390000000000000000",
+            ),
+            tmp_path,
+        )
+
+    assert result.status == expected_status
+    if expected_status == "response_shape_changed":
+        assert not (tmp_path / "raw").exists()
+        return
+    assert site.comment_requests == ["1", "2", "3", "4", "5", "6"]
+    target = tmp_path / "raw" / "douyin" / "7390000000000000000"
+    _, comments, collection = validate_generation(target)
+    assert [comment.raw_comment_id for comment in comments] == ["21", "22", "23"]
+    assert [comment.source_stratum for comment in comments] == ["top", "replies", "long_tail"]
+    assert collection.pages_requested == collection.pages_succeeded == 6
+
+
+def test_live_collector_waits_for_slow_page_and_stops_before_extra_action(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with serve_site("paginated-douyin-slow") as site:
+        adapter = DouyinAdapter()
+
+        class LocalResponseAdapter:
+            def response_kind(self, url: str) -> ResponseKind | None:
+                return adapter.response_kind(f"https://www.douyin.com{urlsplit(url).path}")
+
+        class LocalBrowserSession(BrowserSession):
+            def open(self, url: str, received_adapter: object, consume: object) -> None:
+                del url, received_adapter
+                callback = cast(Callable[[str, object], None], consume)
+
+                def forward(local_url: str, payload: object) -> None:
+                    callback(f"https://www.douyin.com{urlsplit(local_url).path}", payload)
+
+                super().open(site.url, cast(PlatformAdapter, LocalResponseAdapter()), forward)
+
+        monkeypatch.setattr(runner, "BrowserSession", LocalBrowserSession)
+        result = runner.BrowserVideoCollector(
+            supervisor=runner.CliSupervisionGate(
+                read_status=lambda timeout: "ready", write_prompt=lambda prompt: None
+            )
+        ).collect_pilot(
+            runner.PilotRequest(
+                platform="douyin",
+                url="https://www.douyin.com/video/7390000000000000000",
+            ),
+            tmp_path,
+        )
+
+    assert result.status == "success"
+    assert site.comment_requests == ["1", "2", "3", "4", "5"]
+    target = tmp_path / "raw" / "douyin" / "7390000000000000000"
+    _, comments, collection = validate_generation(target)
+    assert [comment.raw_comment_id for comment in comments] == ["21", "22", "23"]
+    assert [comment.source_stratum for comment in comments] == ["top", "replies", "replies"]
+    assert collection.pages_requested == collection.pages_succeeded == 5
+
+
+def test_live_collector_stalls_after_three_no_progress_rounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with serve_site("paginated-douyin-stalled") as site:
+        adapter = DouyinAdapter()
+
+        class LocalResponseAdapter:
+            def response_kind(self, url: str) -> ResponseKind | None:
+                return adapter.response_kind(f"https://www.douyin.com{urlsplit(url).path}")
+
+        class LocalBrowserSession(BrowserSession):
+            def open(self, url: str, received_adapter: object, consume: object) -> None:
+                del url, received_adapter
+                callback = cast(Callable[[str, object], None], consume)
+
+                def forward(local_url: str, payload: object) -> None:
+                    callback(f"https://www.douyin.com{urlsplit(local_url).path}", payload)
+
+                super().open(site.url, cast(PlatformAdapter, LocalResponseAdapter()), forward)
+
+        monkeypatch.setattr(runner, "BrowserSession", LocalBrowserSession)
+        result = runner.BrowserVideoCollector(
+            supervisor=runner.CliSupervisionGate(
+                read_status=lambda timeout: "ready", write_prompt=lambda prompt: None
+            )
+        ).collect_pilot(
+            runner.PilotRequest(
+                platform="douyin",
+                url="https://www.douyin.com/video/7390000000000000000",
+            ),
+            tmp_path,
+        )
+
+    assert result.status == "partial"
+    assert site.comment_requests == [str(number) for number in range(1, 11)]
+    target = tmp_path / "raw" / "douyin" / "7390000000000000000"
+    _, comments, collection = validate_generation(target)
+    assert [comment.raw_comment_id for comment in comments] == ["21"]
+    assert collection.pages_requested == collection.pages_succeeded == 10
+    assert [error.category for error in collection.collection_errors] == ["pagination_stalled"]
 
 
 def test_response_started_during_navigation_is_not_lost(tmp_path: Path) -> None:

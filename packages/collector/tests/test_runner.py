@@ -1482,6 +1482,9 @@ class SupervisedFakeSession:
     def raise_if_response_failed(self) -> None:
         pass
 
+    def wait_for_response_processing(self) -> None:
+        self.raise_if_response_failed()
+
 
 @pytest.mark.parametrize(
     "fatal_status", ["login_failed", "challenge_unresolved", "access_restricted"]
@@ -1530,6 +1533,245 @@ def test_supervision_ready_allows_supported_stratum_actions(
 
     assert result.status == "partial"
     assert actions == ["top", "recent", "replies", "long_tail"]
+
+
+def _bilibili_page(
+    comment_ids: list[int], *, total: int, has_more: bool, cursor: int
+) -> dict[str, object]:
+    return {
+        "code": 0,
+        "data": {
+            "upper": {"mid": 42},
+            "cursor": {"all_count": total, "is_end": not has_more, "next": cursor},
+            "replies": [
+                {
+                    "rpid": comment_id,
+                    "member": {"mid": 99},
+                    "content": {"message": f"comment {comment_id}"},
+                    "ctime": 1789000000 + comment_id,
+                    "like": 0,
+                    "rcount": 0,
+                }
+                for comment_id in comment_ids
+            ],
+        },
+    }
+
+
+class PagingFakeSession:
+    def __init__(self, video_payload: object) -> None:
+        class FakePage:
+            def wait_for_timeout(self, milliseconds: float) -> None:
+                del milliseconds
+
+        self.page = FakePage()
+        self.video_payload = video_payload
+        self.consume: Callable[[str, object], None] | None = None
+        self.response_failure: Exception | None = None
+
+    def __enter__(self) -> PagingFakeSession:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        del args
+        self.raise_if_response_failed()
+
+    def open(self, url: str, adapter: object, consume: object) -> None:
+        del url, adapter
+        self.consume = cast(Callable[[str, object], None], consume)
+        self.consume("https://api.bilibili.com/x/web-interface/view", self.video_payload)
+
+    def emit(self, payload: object) -> None:
+        assert self.consume is not None
+        self.consume("https://api.bilibili.com/x/v2/reply/wbi/main", payload)
+
+    def raise_if_response_failed(self) -> None:
+        if self.response_failure is not None:
+            raise self.response_failure
+
+    def wait_for_response_processing(self) -> None:
+        self.raise_if_response_failed()
+
+
+def _paging_video_payload(total: int) -> dict[str, object]:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures/bilibili/video.json").read_text(encoding="utf-8")
+    )
+    cast(dict[str, object], cast(dict[str, object], payload["data"])["stat"])["reply"] = total
+    return cast(dict[str, object], payload)
+
+
+def test_live_pagination_counts_unique_ids_despite_advancing_cursors_and_stalls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = PagingFakeSession(_paging_video_payload(2))
+    actions: list[str] = []
+
+    def perform(page: object, stratum: str) -> str:
+        del page
+        actions.append(stratum)
+        session.emit(_bilibili_page([11], total=2, has_more=True, cursor=len(actions)))
+        return "performed"
+
+    monkeypatch.setattr(runner, "BrowserSession", lambda: session)
+    monkeypatch.setattr(runner, "perform_stratum_action", perform)
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        request(), tmp_path
+    )
+
+    assert result.status == "partial"
+    assert len(result.comments) == 10
+    assert {item.raw_comment_id for item in result.comments} == {"11"}
+    assert (
+        actions
+        == ["top", "recent", "replies", "long_tail"]
+        + [
+            "replies",
+            "long_tail",
+        ]
+        * 3
+    )
+    assert [error.category for error in result.collection_errors] == ["pagination_stalled"]
+
+
+def test_live_pagination_stops_when_latest_observed_strata_are_exhausted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = PagingFakeSession(_paging_video_payload(2))
+    actions: list[str] = []
+
+    def perform(page: object, stratum: str) -> str:
+        del page
+        actions.append(stratum)
+        has_more = len(actions) <= 4 and stratum in {"replies", "long_tail"}
+        session.emit(_bilibili_page([11], total=2, has_more=has_more, cursor=len(actions)))
+        return "performed"
+
+    monkeypatch.setattr(runner, "BrowserSession", lambda: session)
+    monkeypatch.setattr(runner, "perform_stratum_action", perform)
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        request(), tmp_path
+    )
+
+    assert result.status == "partial"
+    assert actions == ["top", "recent", "replies", "long_tail"] + [
+        "replies",
+        "long_tail",
+    ]
+    assert result.pages_requested == result.pages_succeeded == 6
+    assert result.collection_errors == []
+
+
+def test_live_pagination_does_not_treat_one_observed_stratum_as_global_exhaustion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = PagingFakeSession(_paging_video_payload(2))
+    actions: list[str] = []
+
+    def perform(page: object, stratum: str) -> str:
+        del page
+        actions.append(stratum)
+        if len(actions) == 1:
+            session.emit(_bilibili_page([11], total=2, has_more=False, cursor=1))
+        return "performed"
+
+    monkeypatch.setattr(runner, "BrowserSession", lambda: session)
+    monkeypatch.setattr(runner, "perform_stratum_action", perform)
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        request(), tmp_path
+    )
+
+    assert result.status == "partial"
+    assert (
+        actions
+        == ["top", "recent", "replies", "long_tail"]
+        + [
+            "replies",
+            "long_tail",
+        ]
+        * 3
+    )
+    assert [error.category for error in result.collection_errors] == ["pagination_stalled"]
+
+
+def test_live_pagination_stops_at_target_without_extra_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = PagingFakeSession(_paging_video_payload(2))
+    actions: list[str] = []
+
+    def perform(page: object, stratum: str) -> str:
+        del page
+        actions.append(stratum)
+        comment_id = 11 if len(actions) <= 4 else 12
+        session.emit(_bilibili_page([comment_id], total=2, has_more=True, cursor=len(actions)))
+        return "performed"
+
+    monkeypatch.setattr(runner, "BrowserSession", lambda: session)
+    monkeypatch.setattr(runner, "perform_stratum_action", perform)
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        request(), tmp_path
+    )
+
+    assert result.status == "success"
+    assert actions == ["top", "recent", "replies", "long_tail", "replies"]
+    assert {item.raw_comment_id for item in result.comments} == {"11", "12"}
+
+
+def test_live_pagination_stops_at_one_hundred_rounds_with_safe_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = PagingFakeSession(_paging_video_payload(1000))
+    actions: list[str] = []
+
+    def perform(page: object, stratum: str) -> str:
+        del page
+        actions.append(stratum)
+        session.emit(_bilibili_page([len(actions)], total=1000, has_more=True, cursor=len(actions)))
+        return "performed"
+
+    monkeypatch.setattr(runner, "BrowserSession", lambda: session)
+    monkeypatch.setattr(runner, "perform_stratum_action", perform)
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        request(), tmp_path
+    )
+
+    assert result.status == "partial"
+    assert actions[:4] == ["top", "recent", "replies", "long_tail"]
+    assert actions[4:] == ["replies", "long_tail"] * 100
+    assert len({item.raw_comment_id for item in result.comments}) == 204
+    assert [error.category for error in result.collection_errors] == ["pagination_round_limit"]
+
+
+def test_live_pagination_surfaces_delayed_response_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = PagingFakeSession(_paging_video_payload(2))
+    actions = 0
+
+    def perform(page: object, stratum: str) -> str:
+        nonlocal actions
+        del page, stratum
+        actions += 1
+        session.emit(_bilibili_page([11], total=2, has_more=True, cursor=actions))
+        if actions == 5:
+            session.response_failure = ResponseShapeChanged("response_shape_changed")
+        return "performed"
+
+    monkeypatch.setattr(runner, "BrowserSession", lambda: session)
+    monkeypatch.setattr(runner, "perform_stratum_action", perform)
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        request(), tmp_path
+    )
+
+    assert result.status == "response_shape_changed"
+    assert actions == 5
 
 
 def test_dedicated_collector_passes_fixed_profile_launch_config(

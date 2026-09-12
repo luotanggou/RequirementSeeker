@@ -7,12 +7,17 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from types import TracebackType
 from typing import Literal, Protocol, Self
 
-from playwright.sync_api import Page, Playwright, Response, sync_playwright
+from playwright.sync_api import BrowserContext, Page, Playwright, Request, Response, sync_playwright
 
-from requirementseeker_collector.adapters.base import PlatformAdapter, ResponseShapeChanged
+from requirementseeker_collector.adapters.base import (
+    PlatformAdapter,
+    ResponseKind,
+    ResponseShapeChanged,
+)
 from requirementseeker_collector.contracts import Platform, Stratum
 
 
@@ -116,8 +121,14 @@ class BrowserSession:
         self._launch_config = launch_config or BrowserLaunchConfig()
         self._stack = ExitStack()
         self._cleanup_failed = False
+        self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._response_callback: Callable[[Response], None] | None = None
+        self._request_callback: Callable[[Request], None] | None = None
+        self._request_finished_callback: Callable[[Request], None] | None = None
+        self._request_failed_callback: Callable[[Request], None] | None = None
+        self._supported_requests: set[int] = set()
+        self._response_activity = 0
         self._response_shape_changed = False
         self._response_processing_failed = False
 
@@ -139,6 +150,24 @@ class BrowserSession:
         if self._response_processing_failed:
             raise BrowserSessionError("response_processing_failed") from None
 
+    def wait_for_response_processing(
+        self, *, quiet_seconds: float = 0.75, timeout_seconds: float = 5.0
+    ) -> None:
+        """Wait until supported response activity is quiet and all requests have finished."""
+
+        deadline = monotonic() + timeout_seconds
+        quiet_deadline = monotonic() + quiet_seconds
+        activity = self._response_activity
+        while monotonic() < deadline:
+            self.page.wait_for_timeout(50)
+            self.raise_if_response_failed()
+            if self._response_activity != activity:
+                activity = self._response_activity
+                quiet_deadline = monotonic() + quiet_seconds
+            if not self._supported_requests and monotonic() >= quiet_deadline:
+                return
+        raise BrowserSessionError("response_processing_timeout")
+
     def __enter__(self) -> Self:
         started = False
         try:
@@ -155,6 +184,7 @@ class BrowserSession:
                     channel=channel,
                 )
                 self._stack.callback(self._close, context.close)
+                self._context = context
                 self._page = context.new_page()
             else:
                 if self._launch_config.user_data_dir is not None:
@@ -163,6 +193,7 @@ class BrowserSession:
                 self._stack.callback(self._close, browser.close)
                 context = browser.new_context()
                 self._stack.callback(self._close, context.close)
+                self._context = context
                 self._page = context.new_page()
                 self._stack.callback(self._close, self._page.close)
             started = True
@@ -187,6 +218,7 @@ class BrowserSession:
         traceback: TracebackType | None,
     ) -> None:
         self._stack.close()
+        self._context = None
         self._page = None
         if exc_type is None:
             self.raise_if_response_failed()
@@ -199,15 +231,30 @@ class BrowserSession:
         adapter: PlatformAdapter,
         consume: Callable[[str, object], None],
     ) -> None:
+        def response_kind(url: str) -> ResponseKind | None:
+            try:
+                return adapter.response_kind(url)
+            except ResponseShapeChanged:
+                self._response_shape_changed = True
+                return None
+
+        def on_request(request: Request) -> None:
+            try:
+                if response_kind(request.url) in {"comments", "replies"}:
+                    self._supported_requests.add(id(request))
+                    self._response_activity += 1
+            except Exception:
+                self._response_processing_failed = True
+
+        def finish_request(request: Request) -> None:
+            if id(request) in self._supported_requests:
+                self._supported_requests.remove(id(request))
+                self._response_activity += 1
+
         def on_response(response: Response) -> None:
             try:
                 response_url = response.url
-                try:
-                    response_kind = adapter.response_kind(response_url)
-                except ResponseShapeChanged:
-                    response_kind = None
-                    self._response_shape_changed = True
-                if response_kind is not None:
+                if response_kind(response_url) is not None:
                     payload = response.json()
                     try:
                         consume(response_url, payload)
@@ -217,14 +264,30 @@ class BrowserSession:
                 self._response_processing_failed = True
 
         page = self.page
+        context = self._context
+        if context is None:
+            raise BrowserSessionError("browser_not_open")
         navigated = False
         shape_changed = False
         response_failed = False
         try:
             if self._response_callback is not None:
                 page.remove_listener("response", self._response_callback)
+            if self._request_callback is not None:
+                context.remove_listener("request", self._request_callback)
+            if self._request_finished_callback is not None:
+                context.remove_listener("requestfinished", self._request_finished_callback)
+            if self._request_failed_callback is not None:
+                context.remove_listener("requestfailed", self._request_failed_callback)
+            self._supported_requests.clear()
             page.on("response", on_response)
+            context.on("request", on_request)
+            context.on("requestfinished", finish_request)
+            context.on("requestfailed", finish_request)
+            self._request_callback = on_request
             self._response_callback = on_response
+            self._request_finished_callback = finish_request
+            self._request_failed_callback = finish_request
             page.goto(url)
             navigated = True
         except ResponseShapeChanged:
