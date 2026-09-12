@@ -775,19 +775,19 @@ Use installed Chrome by default. Open one dedicated profile per platform, let th
 - Modify: `packages/collector/tests/integration/test_playwright_collection.py`
 - Modify: `packages/collector/README.md`
 
-- [ ] **Step 1: Write failing pagination state and stop-condition tests**
+- [x] **Step 1: Write failing pagination state and stop-condition tests**
 
 Cover unique-ID progress across repeated responses, duplicate pages, cursor advancement, `has_more=false`, target reached, three consecutive no-progress rounds, the 100-round ceiling, and late response failures. Verify duplicates cannot satisfy the target and every early stop returns `partial` with the required safe audit category.
 
-- [ ] **Step 2: Implement bounded page-driven pagination**
+- [x] **Step 2: Implement bounded page-driven pagination**
 
 Retain each stratum's latest parsed `has_more` and cursor. After initial mode discovery, repeat at most one visible reply expansion and one fixed scroll per round, wait for response processing, and evaluate progress using unique comment IDs. Stop at target, explicit exhaustion, three no-progress rounds, or 100 rounds. Do not construct request URLs, call platform APIs directly, guess hidden selectors, or weaken response validation.
 
-- [ ] **Step 3: Add deterministic local Chromium integration coverage**
+- [x] **Step 3: Add deterministic local Chromium integration coverage**
 
 Extend the loopback fixture so scroll and reply expansion produce multiple artificial pages, including a duplicate page and a final exhausted page. Assert stable ordering, source strata, exact request/success counts, target stopping, stalled stopping, response-race handling, and zero artifacts on a late unknown shape.
 
-- [ ] **Step 4: Run full gates and independent reviews**
+- [x] **Step 4: Run full gates and independent reviews**
 
 Run pagination unit/integration tests, the complete collector and agent suites, Ruff, format, mypy strict, both lock checks, both builds, and diff checks. Complete separate specification and code-quality reviews before accessing real platforms.
 
