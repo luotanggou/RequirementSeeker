@@ -1,5 +1,6 @@
 import re
 import traceback
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, PropertyMock
@@ -11,6 +12,7 @@ from requirementseeker_collector.browser import (
     BrowserLaunchConfig,
     BrowserSession,
     BrowserSessionError,
+    dedicated_profile_path,
     perform_stratum_action,
 )
 
@@ -112,6 +114,36 @@ def test_invalid_launch_config_is_rejected(kwargs):
 def test_launch_config_does_not_accept_an_arbitrary_profile_path() -> None:
     with pytest.raises(TypeError):
         BrowserLaunchConfig(browser="chrome", user_data_dir=Path("personal-profile"))
+
+
+@pytest.mark.parametrize(
+    "platform",
+    [
+        "../unapproved",
+        ".",
+        "unknown",
+        r"bilibili\..\douyin",
+        "bilibili/child",
+        "",
+    ],
+)
+def test_dedicated_profile_path_rejects_untrusted_platform_at_runtime(
+    tmp_path: Path, platform: str
+) -> None:
+    assert dedicated_profile_path(tmp_path, platform, "chrome") is None
+
+
+@pytest.mark.parametrize("platform", ["../unapproved", ".", "unknown", r"bilibili\..\douyin"])
+def test_launch_config_rejects_untrusted_platform_at_runtime(tmp_path: Path, platform: str) -> None:
+    with pytest.raises(ValueError, match="^invalid_browser_launch_config$"):
+        BrowserLaunchConfig(browser="chrome", output_root=tmp_path, platform=platform)
+
+
+def test_launch_config_is_immutable(tmp_path: Path) -> None:
+    config = BrowserLaunchConfig(browser="chrome", output_root=tmp_path, platform="bilibili")
+
+    with pytest.raises(FrozenInstanceError):
+        config.platform = "douyin"
 
 
 def test_dedicated_profile_boundary_is_rechecked_immediately_before_launch(

@@ -43,7 +43,7 @@ def dedicated_profile_path(
 ) -> Path | None:
     """Derive and validate the only profile path a dedicated session may open."""
 
-    if browser not in {"chrome", "edge"}:
+    if platform not in {"bilibili", "douyin"} or browser not in {"chrome", "edge"}:
         return None
     profile = output_root / "browser-profiles" / platform / browser
     reserved = tuple(
