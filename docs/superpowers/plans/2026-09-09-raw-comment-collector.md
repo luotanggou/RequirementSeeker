@@ -746,22 +746,51 @@ Open both platforms' `video.json`, `comments.jsonl`, `collection.json`, and run 
 - Modify: `packages/collector/tests/test_cli.py`
 - Modify: `packages/collector/README.md`
 
-- [ ] **Step 1: Write failing browser profile boundary tests**
+- [x] **Step 1: Write failing browser profile boundary tests**
 
 Verify that the existing default still launches ephemeral bundled Chromium. In explicit dedicated mode, require `chrome|edge`, map only to Playwright `chrome|msedge`, derive `.local-data/m2-real/browser-profiles/<platform>/<browser>/`, and reject symlink, junction, reparse, traversal, overlap with raw/staging/backup/runs/challenges, and paths outside the validated output root. Verify the collector never calls cookie, header, storage-state, or personal-profile import APIs.
 
-- [ ] **Step 2: Implement the minimal dedicated persistent BrowserSession**
+- [x] **Step 2: Implement the minimal dedicated persistent BrowserSession**
 
 Add an immutable launch configuration. Dedicated mode uses `launch_persistent_context` with `headless=False`, the fixed browser channel, and the derived platform-specific user-data directory. Close only the returned context and preserve the browser-managed profile. Keep the existing response error propagation and cleanup priority unchanged; profile unavailable or already in use returns a fixed safe browser failure category.
 
-- [ ] **Step 3: Add explicit CLI flags and runner wiring**
+- [x] **Step 3: Add explicit CLI flags and runner wiring**
 
 Add `--browser chromium|chrome|edge` and `--reuse-login` to `pilot` and `batch`; defaults remain `chromium` plus ephemeral mode. Reject `--reuse-login` with `chromium`, invalid combinations, unsafe output roots, or profile boundary failures before browser launch. Run reports may record only the browser enum and `session_mode=dedicated`, never the profile path or profile contents.
 
-- [ ] **Step 4: Prove reuse with local integration tests and run full gates**
+- [x] **Step 4: Prove reuse with local integration tests and run full gates**
 
 Use a temporary dedicated profile and a loopback page to prove a browser-managed login marker survives closing and reopening without production code reading cookies or storage state. Skip a real Chrome/Edge channel test only when that installed channel is unavailable. Re-run browser, runner, CLI, integration, collector, and agent suites plus Ruff, format, mypy strict, lock checks, builds, and diff checks.
 
 - [ ] **Step 5: Run supervised persistent-session pilots before batch**
 
 Use installed Chrome by default. Open one dedicated profile per platform, let the user log in, close it, then rerun the accepted Bilibili and Douyin videos with the same profile. Validate all three files, record whether counts improve, show the samples, and only then construct the accepted batch manifest. Do not open or copy the user's daily Chrome/Edge profile.
+
+### Task 11: 在批量前完成有界页面分页采集
+
+**Files:**
+- Modify: `packages/collector/src/requirementseeker_collector/runner.py`
+- Modify if needed: `packages/collector/src/requirementseeker_collector/browser.py`
+- Modify: `packages/collector/tests/test_runner.py`
+- Modify: `packages/collector/tests/integration/test_playwright_collection.py`
+- Modify: `packages/collector/README.md`
+
+- [ ] **Step 1: Write failing pagination state and stop-condition tests**
+
+Cover unique-ID progress across repeated responses, duplicate pages, cursor advancement, `has_more=false`, target reached, three consecutive no-progress rounds, the 100-round ceiling, and late response failures. Verify duplicates cannot satisfy the target and every early stop returns `partial` with the required safe audit category.
+
+- [ ] **Step 2: Implement bounded page-driven pagination**
+
+Retain each stratum's latest parsed `has_more` and cursor. After initial mode discovery, repeat at most one visible reply expansion and one fixed scroll per round, wait for response processing, and evaluate progress using unique comment IDs. Stop at target, explicit exhaustion, three no-progress rounds, or 100 rounds. Do not construct request URLs, call platform APIs directly, guess hidden selectors, or weaken response validation.
+
+- [ ] **Step 3: Add deterministic local Chromium integration coverage**
+
+Extend the loopback fixture so scroll and reply expansion produce multiple artificial pages, including a duplicate page and a final exhausted page. Assert stable ordering, source strata, exact request/success counts, target stopping, stalled stopping, response-race handling, and zero artifacts on a late unknown shape.
+
+- [ ] **Step 4: Run full gates and independent reviews**
+
+Run pagination unit/integration tests, the complete collector and agent suites, Ruff, format, mypy strict, both lock checks, both builds, and diff checks. Complete separate specification and code-quality reviews before accessing real platforms.
+
+- [ ] **Step 5: Re-run both accepted pilots with dedicated Chrome profiles**
+
+Let the user log into each platform-specific Chrome profile once, close and reopen it to prove reuse, then collect the same accepted videos with pagination. Compare counts and stop reasons against the anonymous baselines (Bilibili 35/200, Douyin 28/200). Do not run batch until both persistent paginated samples validate.

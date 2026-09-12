@@ -102,6 +102,8 @@ rs-dataset validate-labels <label-root>
 
 持久模式是显式 opt-in。CLI 只接受固定浏览器枚举 `chrome|edge`，内部映射 Playwright 的受支持 channel；profile 路径完全由已校验的输出根、平台和浏览器枚举构造。创建和使用前必须执行与原始产物相同的 lexical、resolve 和 Windows reparse-point 边界检查，拒绝符号链接、junction、越界路径及正在被另一浏览器进程占用的 profile。运行审计只记录浏览器枚举与 `session_mode=dedicated`，不记录 profile 绝对路径或其中任何文件。
 
+分页只通过页面自身的可见交互触发，不直接构造或重放评论 API 请求。采集器保留每个来源层最近一次已解析的 `has_more` 与 cursor 状态，并按评论 ID 的去重数量计算进度；重复响应不得虚增完成度。每轮最多执行一次可访问的回复展开和一次固定距离滚动，随后等待响应完成。达到目标、平台明确无更多数据、连续 3 轮没有新增评论或累计 100 轮时停止。连续无进展或轮次上限导致的提前停止必须记录固定审计类别并返回 `partial`，不得声称达到目标；未知响应、登录失效和访问限制仍按原规则失败关闭。
+
 适配器只认可显式支持的载荷版本或字段组合。响应返回 HTTP 成功但形状未知时，归类为页面/响应结构变化，而不是猜测字段含义。
 
 候选发现复用 BrowserSession、ChallengeHandler 和平台页面识别，但使用独立适配器入口，只读取候选列表所需的公开视频元数据。候选发现产生 `.local-data/m2-real/candidates/<run-id>/manifest.json` 和 `discovery.json`；用户确认后的清单复制为批量输入，发现器不直接调用 `batch`。
