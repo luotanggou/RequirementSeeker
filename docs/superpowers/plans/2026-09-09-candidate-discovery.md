@@ -34,7 +34,7 @@
 - Create: `packages/collector/tests/candidates/test_contracts.py`
 - Create: `packages/collector/schemas/candidate-video.schema.json`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_candidate_requires_a_public_platform_url() -> None:
@@ -53,13 +53,13 @@ def test_manifest_rejects_credentials_in_url() -> None:
         ManifestVideo(**manifest_video_data(url="https://user:pass@bilibili.com/video/BVfake"))
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/candidates/test_contracts.py -q`
 
 Expected: candidate contract import fails.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```python
 class CandidateVideo(Contract):
@@ -83,13 +83,13 @@ class CandidateVideo(Contract):
 
 Import `CollectionManifest`, `Direction` and `ManifestVideo` from the collector root contracts without redefining them. Export `CandidateVideo.model_json_schema()` to the checked-in candidate schema; keep the existing collection manifest schema unchanged.
 
-- [ ] **Step 4: Run contract tests and checks**
+- [x] **Step 4: Run contract tests and checks**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/candidates/test_contracts.py -q && uv run --project packages/collector mypy packages/collector/src`
 
 Expected: contract tests and mypy pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector/src/requirementseeker_collector/candidates packages/collector/tests/candidates/test_contracts.py packages/collector/schemas/candidate-video.schema.json
