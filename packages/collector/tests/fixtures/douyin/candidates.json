@@ -1,0 +1,29 @@
+{
+  "status_code": 0,
+  "data": [
+    {
+      "aweme_info": {
+        "aweme_id": "7390000000000000001",
+        "desc": "Synthetic Douyin Tool One",
+        "statistics": {
+          "comment_count": 32
+        }
+      },
+      "display_metadata": {
+        "reason": "synthetic search match"
+      }
+    },
+    {
+      "aweme_info": {
+        "aweme_id": "7390000000000000002",
+        "desc": "Synthetic Douyin Tool Two",
+        "statistics": {
+          "comment_count": 420
+        }
+      },
+      "display_metadata": {
+        "reason": "synthetic search match"
+      }
+    }
+  ]
+}

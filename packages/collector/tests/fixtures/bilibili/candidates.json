@@ -1,0 +1,19 @@
+{
+  "code": 0,
+  "data": {
+    "result": [
+      {
+        "bvid": "BVfake1",
+        "title": "Synthetic Bilibili Tool One",
+        "review": 125,
+        "author": "Fixture Author"
+      },
+      {
+        "bvid": "BVfake2",
+        "title": "Synthetic Bilibili Tool Two",
+        "review": 2400,
+        "author": "Fixture Author"
+      }
+    ]
+  }
+}
