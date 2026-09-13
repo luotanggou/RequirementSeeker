@@ -14,6 +14,8 @@ from requirementseeker_collector.candidates.discovery import (
     BrowserCandidateSource,
     CandidatePage,
     DiscoveryRequest,
+    _dom_payload,
+    _search_url,
     discover,
 )
 
@@ -132,7 +134,11 @@ class FakePage:
 
     def locator(self, selector: str) -> FakeLocator:
         self.locator_calls.append(selector)
-        return FakeLocator(self.dom_rows)
+        if selector == (
+            "[data-candidate-results] [data-candidate-video][data-video-key][data-title]"
+        ):
+            return FakeLocator(self.dom_rows)
+        return FakeLocator([])
 
 
 class FakeResponse:
@@ -142,6 +148,73 @@ class FakeResponse:
 
     def json(self) -> Mapping[str, object]:
         return self.payload
+
+
+class ElementLocator:
+    def __init__(self, elements: list[dict[str, Any]]) -> None:
+        self.elements = elements
+
+    def count(self) -> int:
+        return len(self.elements)
+
+    def nth(self, index: int) -> "ElementLocator":
+        return ElementLocator([self.elements[index]])
+
+    def locator(self, selector: str) -> "ElementLocator":
+        element = self.elements[0]
+        return ElementLocator(list(element.get("children", {}).get(selector, [])))
+
+    def get_attribute(self, name: str) -> str | None:
+        return self.elements[0].get("attributes", {}).get(name)
+
+    def text_content(self) -> str | None:
+        return self.elements[0].get("text")
+
+
+class BilibiliDomPage:
+    def __init__(
+        self,
+        *,
+        cards: list[dict[str, Any]] | None = None,
+        wraps: list[dict[str, Any]] | None = None,
+        footer_links: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.cards = cards or []
+        self.wraps = wraps or []
+        self.footer_links = footer_links or []
+        self.locator_calls: list[str] = []
+
+    def locator(self, selector: str) -> ElementLocator:
+        self.locator_calls.append(selector)
+        if selector == ".bili-video-card":
+            return ElementLocator(self.cards)
+        if selector == ".bili-video-card__wrap":
+            return ElementLocator(self.wraps)
+        if selector == "a[href]":
+            return ElementLocator(self.footer_links)
+        return ElementLocator([])
+
+
+def element(
+    *,
+    href: str | None = None,
+    title: str | None = None,
+    text: str | None = None,
+    children: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    attributes = {}
+    if href is not None:
+        attributes["href"] = href
+    if title is not None:
+        attributes["title"] = title
+    return {"attributes": attributes, "text": text, "children": children or {}}
+
+
+def bili_card(
+    links: list[dict[str, Any]], *, title: str | None, text: str | None = None
+) -> dict[str, Any]:
+    headings = [] if title is None and text is None else [element(title=title, text=text)]
+    return element(children={"a[href]": links, "h3": headings})
 
 
 class FakeSession:
@@ -179,9 +252,259 @@ class FakeSession:
 def page(number: int, *items: tuple[str, str, int]) -> CandidatePage:
     return CandidatePage(
         page_number=number,
-        source_page=(f"https://search.bilibili.com/all?keyword=efficiency%20tools&page={number}"),
+        source_page=(f"https://search.bilibili.com/video?keyword=efficiency%20tools&page={number}"),
         payload=bili_payload(*items),
     )
+
+
+def test_bilibili_query_uses_video_search_pages() -> None:
+    discovery_request = request(max_pages=2)
+
+    assert _search_url(discovery_request, 1) == (
+        "https://search.bilibili.com/video?keyword=efficiency%20tools&page=1"
+    )
+    assert _search_url(discovery_request, 2) == (
+        "https://search.bilibili.com/video?keyword=efficiency%20tools&page=2"
+    )
+
+
+def test_bilibili_dom_reads_only_trusted_cards_in_page_order() -> None:
+    first_link = element(href="https://www.bilibili.com/video/BV1xx411c7mD?p=1")
+    page = BilibiliDomPage(
+        cards=[
+            bili_card(
+                [first_link, element(href="//www.bilibili.com/video/BV1xx411c7mD")],
+                title="First title",
+            ),
+            bili_card(
+                [element(href="https://www.bilibili.com/video/BV1Q541167Qg")],
+                title=None,
+                text="  Second title  ",
+            ),
+        ],
+        footer_links=[element(href="https://www.bilibili.com/video/BV1ab411c7mE")],
+    )
+
+    payload = _dom_payload(page, "bilibili")  # type: ignore[arg-type]
+
+    assert payload == {
+        "code": 0,
+        "data": {
+            "result": [
+                {"bvid": "BV1xx411c7mD", "title": "First title", "review": None},
+                {"bvid": "BV1Q541167Qg", "title": "Second title", "review": None},
+            ]
+        },
+    }
+    assert "a[href]" not in page.locator_calls
+
+
+def test_bilibili_dom_accepts_wrap_as_trusted_card_container() -> None:
+    page = BilibiliDomPage(
+        wraps=[
+            bili_card(
+                [element(href="https://www.bilibili.com/video/BV1xx411c7mD")],
+                title="Wrapped title",
+            )
+        ]
+    )
+
+    payload = _dom_payload(page, "bilibili")  # type: ignore[arg-type]
+
+    assert payload == {
+        "code": 0,
+        "data": {"result": [{"bvid": "BV1xx411c7mD", "title": "Wrapped title", "review": None}]},
+    }
+
+
+def test_bilibili_dom_excludes_malformed_cards_when_valid_card_exists() -> None:
+    page = BilibiliDomPage(
+        cards=[
+            bili_card(
+                [element(href="https://www.bilibili.com/video/not-a-bvid")],
+                title="invalid id",
+            ),
+            bili_card(
+                [element(href="https://example.com/video/BV1xx411c7mD")],
+                title="foreign",
+            ),
+            bili_card(
+                [element(href="https://www.bilibili.com/video/BV1xx411c7mD")],
+                title=None,
+            ),
+            bili_card(
+                [element(href="https://www.bilibili.com/video/BV1Q541167Qg")],
+                title="valid",
+            ),
+        ]
+    )
+
+    payload = _dom_payload(page, "bilibili")  # type: ignore[arg-type]
+
+    assert payload == {
+        "code": 0,
+        "data": {"result": [{"bvid": "BV1Q541167Qg", "title": "valid", "review": None}]},
+    }
+
+
+@pytest.mark.parametrize(
+    "ambiguous_card",
+    [
+        element(
+            children={
+                "a[href]": [
+                    element(href="https://www.bilibili.com/video/BV1xx411c7mD"),
+                    element(href="https://www.bilibili.com/video/BV1Q541167Qg"),
+                ],
+                "h3": [element(title="one title")],
+            }
+        ),
+        element(
+            children={
+                "a[href]": [element(href="https://www.bilibili.com/video/BV1xx411c7mD")],
+                "h3": [element(title="first title"), element(text="second title")],
+            }
+        ),
+    ],
+)
+def test_bilibili_dom_rejects_ambiguous_card(ambiguous_card: dict[str, Any]) -> None:
+    page = BilibiliDomPage(cards=[ambiguous_card])
+
+    assert _dom_payload(page, "bilibili") is None  # type: ignore[arg-type]
+
+
+def test_bilibili_dom_accepts_duplicate_same_bv_and_title() -> None:
+    page = BilibiliDomPage(
+        cards=[
+            element(
+                children={
+                    "a[href]": [
+                        element(href="https://www.bilibili.com/video/BV1xx411c7mD"),
+                        element(href="//www.bilibili.com/video/BV1xx411c7mD?p=1"),
+                    ],
+                    "h3": [element(title="same title"), element(text=" same title ")],
+                }
+            )
+        ]
+    )
+
+    assert _dom_payload(page, "bilibili") == {  # type: ignore[arg-type]
+        "code": 0,
+        "data": {"result": [{"bvid": "BV1xx411c7mD", "title": "same title", "review": None}]},
+    }
+
+
+def test_bilibili_ambiguous_card_fails_before_publishing(tmp_path: Path) -> None:
+    card = element(
+        children={
+            "a[href]": [
+                element(href="https://www.bilibili.com/video/BV1xx411c7mD"),
+                element(href="https://www.bilibili.com/video/BV1Q541167Qg"),
+            ],
+            "h3": [element(title="ambiguous")],
+        }
+    )
+
+    class AmbiguousPage(FakePage):
+        def locator(self, selector: str) -> Any:
+            self.locator_calls.append(selector)
+            if selector == ".bili-video-card":
+                return ElementLocator([card])
+            return ElementLocator([])
+
+    page = AmbiguousPage(
+        final_url="https://search.bilibili.com/video?keyword=efficiency%20tools&page=1"
+    )
+    source = BrowserCandidateSource(
+        BrowserLaunchConfig(),
+        session=FakeSession(page),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        discover(request(max_pages=1), browser=source, output_root=tmp_path)
+
+    assert not (tmp_path / "candidates").exists()
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        BilibiliDomPage(),
+        BilibiliDomPage(
+            cards=[
+                bili_card(
+                    [element(href="https://www.bilibili.com/video/not-a-bvid")],
+                    title="unknown structure",
+                )
+            ]
+        ),
+    ],
+)
+def test_bilibili_dom_without_legal_candidate_fails_closed(page: BilibiliDomPage) -> None:
+    assert _dom_payload(page, "bilibili") is None  # type: ignore[arg-type]
+
+
+def test_bilibili_dom_rejects_generic_candidate_rows() -> None:
+    page = FakePage(
+        final_url="https://search.bilibili.com/video?keyword=efficiency%20tools&page=1",
+        dom_rows=[
+            {
+                "data-video-key": "BV1xx411c7mD",
+                "data-title": "generic row",
+                "data-comment-count": "3",
+            }
+        ],
+    )
+
+    assert _dom_payload(page, "bilibili") is None  # type: ignore[arg-type]
+
+
+def test_bilibili_generic_candidate_rows_fail_before_publishing(tmp_path: Path) -> None:
+    page = FakePage(
+        final_url="https://search.bilibili.com/video?keyword=efficiency%20tools&page=1",
+        dom_rows=[
+            {
+                "data-video-key": "BV1xx411c7mD",
+                "data-title": "generic row",
+                "data-comment-count": "3",
+            }
+        ],
+    )
+    source = BrowserCandidateSource(
+        BrowserLaunchConfig(),
+        session=FakeSession(page),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        discover(request(max_pages=1), browser=source, output_root=tmp_path)
+
+    assert not (tmp_path / "candidates").exists()
+
+
+def test_douyin_dom_keeps_generic_candidate_row_fallback() -> None:
+    page = FakePage(
+        final_url="https://www.douyin.com/search/efficiency%20tools",
+        dom_rows=[
+            {
+                "data-video-key": "7390000000000000001",
+                "data-title": "generic row",
+                "data-comment-count": "7",
+            }
+        ],
+    )
+
+    assert _dom_payload(page, "douyin") == {  # type: ignore[arg-type]
+        "status_code": 0,
+        "data": [
+            {
+                "aweme_info": {
+                    "aweme_id": "7390000000000000001",
+                    "desc": "generic row",
+                    "statistics": {"comment_count": 7},
+                }
+            }
+        ],
+    }
 
 
 @pytest.mark.parametrize(
@@ -353,7 +676,7 @@ def test_unknown_shape_fails_closed_without_candidate_artifacts(tmp_path: Path) 
             page(1, ("BV1", "one", 1)),
             CandidatePage(
                 page_number=2,
-                source_page=("https://search.bilibili.com/all?keyword=efficiency%20tools&page=2"),
+                source_page=("https://search.bilibili.com/video?keyword=efficiency%20tools&page=2"),
                 payload={"code": 0, "data": {"unknown": []}},
             ),
         ]
@@ -385,8 +708,8 @@ def test_untrusted_page_source_fails_closed_without_candidate_artifacts(tmp_path
 @pytest.mark.parametrize(
     "source_page",
     [
-        "https://search.bilibili.com/all?keyword=other&page=1",
-        "https://search.bilibili.com/all?keyword=efficiency%20tools&page=99",
+        "https://search.bilibili.com/video?keyword=other&page=1",
+        "https://search.bilibili.com/video?keyword=efficiency%20tools&page=99",
         "https://search.bilibili.com/account/login?keyword=efficiency%20tools&page=1",
     ],
 )
@@ -475,7 +798,7 @@ def test_bilibili_first_page_accepts_navigation_without_explicit_page_one(
     tmp_path: Path,
 ) -> None:
     page = FakePage(
-        final_url="https://search.bilibili.com/all?keyword=efficiency%20tools",
+        final_url="https://search.bilibili.com/video?keyword=efficiency%20tools",
         responses=[
             (
                 "https://api.bilibili.com/x/web-interface/search/type"
@@ -619,8 +942,8 @@ def test_bilibili_first_page_rejects_other_navigation_changes(
 @pytest.mark.parametrize(
     "second_page_url",
     [
-        "https://search.bilibili.com/all?keyword=efficiency%20tools",
-        "https://search.bilibili.com/all?keyword=efficiency%20tools&page=3",
+        "https://search.bilibili.com/video?keyword=efficiency%20tools",
+        "https://search.bilibili.com/video?keyword=efficiency%20tools&page=3",
     ],
 )
 def test_bilibili_later_page_requires_exact_page_number(
@@ -637,7 +960,7 @@ def test_bilibili_later_page_requires_exact_page_number(
             del url
             self.open_count += 1
             self.page.url = (
-                "https://search.bilibili.com/all?keyword=efficiency%20tools"
+                "https://search.bilibili.com/video?keyword=efficiency%20tools"
                 if self.open_count == 1
                 else second_page_url
             )
@@ -670,7 +993,7 @@ def test_unrelated_candidate_response_is_ignored_before_publishing(
     tmp_path: Path, response_url: str
 ) -> None:
     page = FakePage(
-        final_url="https://search.bilibili.com/all?keyword=efficiency%20tools&page=1",
+        final_url="https://search.bilibili.com/video?keyword=efficiency%20tools&page=1",
         responses=[(response_url, bili_payload(("BV1", "unrelated", 1)))],
     )
     source = BrowserCandidateSource(
@@ -715,7 +1038,7 @@ def test_douyin_candidate_response_must_match_query_and_page_offset(tmp_path: Pa
 
 
 def test_empty_page_fails_closed_before_publishing(tmp_path: Path) -> None:
-    page = FakePage(final_url="https://search.bilibili.com/all?keyword=efficiency%20tools&page=1")
+    page = FakePage(final_url="https://search.bilibili.com/video?keyword=efficiency%20tools&page=1")
     source = BrowserCandidateSource(
         BrowserLaunchConfig(),
         session=FakeSession(page),  # type: ignore[arg-type]
@@ -729,7 +1052,7 @@ def test_empty_page_fails_closed_before_publishing(tmp_path: Path) -> None:
 
 def test_delayed_candidate_response_is_collected_during_bounded_wait(tmp_path: Path) -> None:
     page = FakePage(
-        final_url="https://search.bilibili.com/all?keyword=efficiency%20tools&page=1",
+        final_url="https://search.bilibili.com/video?keyword=efficiency%20tools&page=1",
         delayed_responses=[
             (
                 "https://api.bilibili.com/x/web-interface/search/type"
@@ -749,7 +1072,7 @@ def test_delayed_candidate_response_is_collected_during_bounded_wait(tmp_path: P
 
 
 def test_response_arriving_during_session_quiet_wait_is_collected(tmp_path: Path) -> None:
-    page = FakePage(final_url="https://search.bilibili.com/all?keyword=efficiency%20tools&page=1")
+    page = FakePage(final_url="https://search.bilibili.com/video?keyword=efficiency%20tools&page=1")
 
     class QuietWindowSession(FakeSession):
         def __init__(self, browser_page: FakePage) -> None:
@@ -789,7 +1112,7 @@ def test_redirect_during_quiet_wait_fails_before_response_or_dom_publish(
         "https://api.bilibili.com/x/web-interface/search/type?keyword=efficiency%20tools&page=1"
     )
     page = FakePage(
-        final_url="https://search.bilibili.com/all?keyword=efficiency%20tools&page=1",
+        final_url="https://search.bilibili.com/video?keyword=efficiency%20tools&page=1",
         responses=[(response_url, bili_payload(("BV1", "one", 1)))] if use_response else [],
         dom_rows=[]
         if use_response
@@ -820,7 +1143,7 @@ def test_redirect_during_quiet_wait_fails_before_response_or_dom_publish(
 
 
 def test_late_response_from_previous_page_cannot_pollute_next_page(tmp_path: Path) -> None:
-    page = FakePage(final_url="https://search.bilibili.com/all?keyword=efficiency%20tools&page=1")
+    page = FakePage(final_url="https://search.bilibili.com/video?keyword=efficiency%20tools&page=1")
 
     class CrossPageSession(FakeSession):
         def __init__(self, browser_page: FakePage) -> None:
@@ -858,7 +1181,7 @@ def test_discovery_rejects_comment_payload_without_publishing(tmp_path: Path) ->
         [
             CandidatePage(
                 page_number=1,
-                source_page=("https://search.bilibili.com/all?keyword=efficiency%20tools&page=1"),
+                source_page=("https://search.bilibili.com/video?keyword=efficiency%20tools&page=1"),
                 payload=payload,
             )
         ]

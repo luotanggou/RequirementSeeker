@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -42,6 +43,7 @@ _CANDIDATE_RESPONSE_PATHS: dict[Platform, tuple[str, ...]] = {
     "douyin": ("/aweme/v1/web/general/search/single/",),
 }
 _PUBLIC_URL_ADAPTER = TypeAdapter(PublicHttpUrl)
+_BILIBILI_VIDEO_PATH = re.compile(r"^/video/(BV[0-9A-Za-z]{10})/?$")
 
 
 def _is_candidate_page(platform: Platform, url: str) -> bool:
@@ -189,7 +191,7 @@ def _search_url(request: DiscoveryRequest, page_number: int) -> str:
     assert request.query is not None
     encoded = quote(request.query, safe="")
     if request.platform == "bilibili":
-        return f"https://search.bilibili.com/all?keyword={encoded}&page={page_number}"
+        return f"https://search.bilibili.com/video?keyword={encoded}&page={page_number}"
     suffix = "" if page_number == 1 else f"?page={page_number}"
     return f"https://www.douyin.com/search/{encoded}{suffix}"
 
@@ -248,8 +250,65 @@ class _CandidateResponseAdapter:
         return "comments" if count > 0 and offset == expected_offset else None
 
 
+def _bilibili_card_payload(page: Page) -> CandidatePayload | None:
+    cards = page.locator(".bili-video-card")
+    if cards.count() == 0:
+        cards = page.locator(".bili-video-card__wrap")
+    card_count = cards.count()
+    if card_count == 0:
+        return None
+
+    values: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for card_index in range(card_count):
+        card = cards.nth(card_index)
+        headings = card.locator("h3")
+        titles = {
+            title
+            for heading_index in range(headings.count())
+            if (
+                title := (
+                    headings.nth(heading_index).get_attribute("title")
+                    or headings.nth(heading_index).text_content()
+                    or ""
+                ).strip()
+            )
+        }
+        if len(titles) != 1:
+            continue
+        links = card.locator("a[href]")
+        video_keys: list[str] = []
+        for link_index in range(links.count()):
+            href = links.nth(link_index).get_attribute("href")
+            if href is None:
+                continue
+            normalized = f"https:{href}" if href.startswith("//") else href
+            try:
+                parsed = urlsplit(normalized)
+            except ValueError:
+                continue
+            match = _BILIBILI_VIDEO_PATH.fullmatch(parsed.path)
+            if parsed.scheme != "https" or parsed.hostname != "www.bilibili.com" or match is None:
+                continue
+            video_key = match.group(1)
+            if video_key not in video_keys:
+                video_keys.append(video_key)
+        if len(video_keys) != 1:
+            continue
+        video_key = video_keys[0]
+        if video_key not in seen:
+            seen.add(video_key)
+            values.append({"bvid": video_key, "title": next(iter(titles)), "review": None})
+    if not values:
+        return None
+    return {"code": 0, "data": {"result": values}}
+
+
 def _dom_payload(page: Page, platform: Platform) -> CandidatePayload | None:
-    """Read only explicitly labelled candidate metadata rows, never page text."""
+    """Read only candidate metadata inside trusted result containers."""
+
+    if platform == "bilibili":
+        return _bilibili_card_payload(page)
 
     rows = page.locator(
         "[data-candidate-results] [data-candidate-video][data-video-key][data-title]"
@@ -264,20 +323,15 @@ def _dom_payload(page: Page, platform: Platform) -> CandidatePayload | None:
         title = row.get_attribute("data-title")
         raw_count = row.get_attribute("data-comment-count")
         comment_count = int(raw_count) if raw_count is not None and raw_count.isdigit() else None
-        if platform == "bilibili":
-            values.append({"bvid": video_key, "title": title, "review": comment_count})
-        else:
-            values.append(
-                {
-                    "aweme_info": {
-                        "aweme_id": video_key,
-                        "desc": title,
-                        "statistics": {"comment_count": comment_count},
-                    }
+        values.append(
+            {
+                "aweme_info": {
+                    "aweme_id": video_key,
+                    "desc": title,
+                    "statistics": {"comment_count": comment_count},
                 }
-            )
-    if platform == "bilibili":
-        return {"code": 0, "data": {"result": values}}
+            }
+        )
     return {"status_code": 0, "data": values}
 
 
