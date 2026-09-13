@@ -167,7 +167,7 @@ git commit -m "feat(collector): parse public candidate listings"
 - Create: `packages/collector/src/requirementseeker_collector/candidates/discovery.py`
 - Create: `packages/collector/tests/candidates/test_discovery.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_discovery_deduplicates_and_preserves_first_rank(tmp_path: Path) -> None:
@@ -182,13 +182,13 @@ def test_discovery_writes_manifest_but_never_calls_batch(tmp_path: Path) -> None
     batch.assert_not_called()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/candidates/test_discovery.py -q`
 
 Expected: discovery import fails.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 `DiscoveryRequest` requires exactly one of query or source URL, plus platform and direction. Open a visible page through `BrowserSession`; default to ephemeral Chromium and allow only the existing explicit dedicated `chrome|edge + reuse_login` combinations. Collect supported candidate responses or metadata DOM rows, stop at requested page/result cap, deduplicate by `(platform, video_key)` while preserving first discovery, and write `candidates/<run-id>/manifest.json` plus `discovery.json` through safe audit utilities.
 
@@ -204,13 +204,13 @@ def deduplicate_candidates(items: Iterable[CandidateVideo]) -> list[CandidateVid
     return result
 ```
 
-- [ ] **Step 4: Run discovery tests**
+- [x] **Step 4: Run discovery tests**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/candidates/test_discovery.py -q && uv run --project packages/collector ruff check packages/collector/src packages/collector/tests`
 
 Expected: deterministic discovery and no-auto-batch tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector/src/requirementseeker_collector/candidates/discovery.py packages/collector/tests/candidates/test_discovery.py
