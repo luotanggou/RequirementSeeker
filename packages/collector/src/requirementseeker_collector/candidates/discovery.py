@@ -9,7 +9,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, Protocol, Self, cast
-from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
+from urllib.parse import (
+    parse_qs,
+    parse_qsl,
+    quote,
+    unquote,
+    unquote_plus,
+    urlencode,
+    urlsplit,
+    urlunsplit,
+)
 from uuid import uuid4
 
 from playwright.sync_api import Page
@@ -79,6 +88,13 @@ class DiscoveryRequest(Contract):
                 raise ValueError("source_url_platform_mismatch")
             if not _is_candidate_page(self.platform, str(self.source_url)):
                 raise ValueError("source_url_not_candidate_page")
+            page_parameters = [
+                value
+                for key, value in parse_qsl(self.source_url.query, keep_blank_values=True)
+                if key == "page"
+            ]
+            if len(page_parameters) > 1:
+                raise ValueError("duplicate_source_page_parameter")
         return self
 
 
@@ -149,12 +165,26 @@ def deduplicate_candidates(items: Iterable[CandidateVideo]) -> list[CandidateVid
 
 def _search_url(request: DiscoveryRequest, page_number: int) -> str:
     if request.source_url is not None:
-        parts = urlsplit(str(request.source_url))
-        query = dict(parse_qsl(parts.query, keep_blank_values=True))
-        if page_number > 1:
-            query["page"] = str(page_number)
+        source_url = str(request.source_url)
+        if page_number == 1:
+            return source_url
+        parts = urlsplit(source_url)
+        query_parts = parts.query.split("&") if parts.query else []
+        page_index = next(
+            (
+                index
+                for index, item in enumerate(query_parts)
+                if unquote_plus(item.partition("=")[0]) == "page"
+            ),
+            None,
+        )
+        if page_index is None:
+            query_parts.append(f"page={page_number}")
+        else:
+            raw_key = query_parts[page_index].partition("=")[0]
+            query_parts[page_index] = f"{raw_key}={page_number}"
         return urlunsplit(
-            (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+            (parts.scheme, parts.netloc, parts.path, "&".join(query_parts), parts.fragment)
         )
     assert request.query is not None
     encoded = quote(request.query, safe="")
@@ -251,7 +281,14 @@ def _dom_payload(page: Page, platform: Platform) -> CandidatePayload | None:
     return {"status_code": 0, "data": values}
 
 
-def _validate_navigated_url(platform: Platform, requested_url: str, actual_url: str) -> None:
+def _validate_navigated_url(
+    platform: Platform,
+    requested_url: str,
+    actual_url: str,
+    *,
+    allow_bilibili_implicit_page_one: bool = False,
+    require_exact_query: bool = False,
+) -> None:
     try:
         requested = _PUBLIC_URL_ADAPTER.validate_python(requested_url)
         actual = _PUBLIC_URL_ADAPTER.validate_python(actual_url)
@@ -262,11 +299,26 @@ def _validate_navigated_url(platform: Platform, requested_url: str, actual_url: 
     actual_path = (actual.path or "/").rstrip("/")
     requested_query = parse_qs(requested.query, keep_blank_values=True)
     actual_query = parse_qs(actual.query, keep_blank_values=True)
+    query_mismatch = (
+        actual_query != requested_query
+        if require_exact_query
+        else any(
+            actual_query.get(key) != values
+            and not (
+                platform == "bilibili"
+                and allow_bilibili_implicit_page_one
+                and key == "page"
+                and values == ["1"]
+                and key not in actual_query
+            )
+            for key, values in requested_query.items()
+        )
+    )
     if (
         requested.host is None
         or actual_host != requested.host
         or actual_path != requested_path
-        or any(actual_query.get(key) != values for key, values in requested_query.items())
+        or query_mismatch
         or not _is_candidate_page(platform, actual_url)
         or not any(
             actual_host == root or actual_host.endswith(f".{root}")
@@ -297,10 +349,25 @@ def _capture_candidate_payloads(
         _expected_query(request, source_page),
         page_number,
     )
+    allow_bilibili_implicit_page_one = (
+        request.platform == "bilibili" and request.query is not None and page_number == 1
+    )
     open_page(source_page, cast(PlatformAdapter, matcher), consume)
-    _validate_navigated_url(request.platform, source_page, page.url)
+    _validate_navigated_url(
+        request.platform,
+        source_page,
+        page.url,
+        allow_bilibili_implicit_page_one=allow_bilibili_implicit_page_one,
+        require_exact_query=request.source_url is not None,
+    )
     wait_for_response_processing(quiet_seconds=0.75, timeout_seconds=5.0)
-    _validate_navigated_url(request.platform, source_page, page.url)
+    _validate_navigated_url(
+        request.platform,
+        source_page,
+        page.url,
+        allow_bilibili_implicit_page_one=allow_bilibili_implicit_page_one,
+        require_exact_query=request.source_url is not None,
+    )
     if not captured:
         dom = _dom_payload(page, request.platform)
         if dom is not None:
@@ -402,7 +469,12 @@ def _validate_source_page(request: DiscoveryRequest, candidate_page: CandidatePa
     expected_page = without_pagination(_search_url(request, 1))
     actual_page = without_pagination(candidate_page.source_page)
     try:
-        _validate_navigated_url(request.platform, expected_page, actual_page)
+        _validate_navigated_url(
+            request.platform,
+            expected_page,
+            actual_page,
+            require_exact_query=request.source_url is not None,
+        )
         page_number = source_page_number(candidate_page.source_page)
     except (TypeError, ValueError):
         raise ValueError("candidate_source_page_mismatch") from None

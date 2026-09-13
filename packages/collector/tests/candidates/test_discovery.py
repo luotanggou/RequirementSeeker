@@ -223,6 +223,14 @@ def test_discovery_source_url_must_be_a_supported_candidate_page() -> None:
         request(query=None, source_url="https://www.bilibili.com/account/login")
 
 
+def test_discovery_source_url_rejects_duplicate_page_parameters() -> None:
+    with pytest.raises(ValidationError, match="duplicate_source_page_parameter"):
+        request(
+            query=None,
+            source_url=("https://search.bilibili.com/all?keyword=efficiency%20tools&page=1&page=2"),
+        )
+
+
 @pytest.mark.parametrize("query", ["first\nsecond", "first\rsecond", "x" * 201])
 def test_discovery_query_is_bounded_single_line_text(query: str) -> None:
     with pytest.raises(ValidationError):
@@ -463,9 +471,131 @@ def test_cross_site_redirect_fails_before_dom_fallback(tmp_path: Path) -> None:
     assert not (tmp_path / "candidates").exists()
 
 
-def test_same_site_login_redirect_fails_before_dom_fallback(tmp_path: Path) -> None:
+def test_bilibili_first_page_accepts_navigation_without_explicit_page_one(
+    tmp_path: Path,
+) -> None:
     page = FakePage(
-        final_url="https://search.bilibili.com/account/login",
+        final_url="https://search.bilibili.com/all?keyword=efficiency%20tools",
+        responses=[
+            (
+                "https://api.bilibili.com/x/web-interface/search/type"
+                "?keyword=efficiency%20tools&page=1",
+                bili_payload(("BV1", "one", 1)),
+            )
+        ],
+    )
+    source = BrowserCandidateSource(
+        BrowserLaunchConfig(),
+        session=FakeSession(page),  # type: ignore[arg-type]
+    )
+
+    result = discover(request(max_pages=1), browser=source, output_root=tmp_path)
+
+    assert [item.video_key for item in result.candidates] == ["BV1"]
+
+
+@pytest.mark.parametrize(
+    ("source_url", "final_url"),
+    [
+        (
+            "https://search.bilibili.com/all?keyword=efficiency%20tools&page=1",
+            "https://search.bilibili.com/all?keyword=efficiency%20tools",
+        ),
+        (
+            "https://www.bilibili.com/v/popular/all?page=1",
+            "https://www.bilibili.com/v/popular/all",
+        ),
+        (
+            "https://search.bilibili.com/all?keyword=efficiency%20tools&page=1",
+            "https://search.bilibili.com/all?keyword=efficiency%20tools&page=1&order=click",
+        ),
+    ],
+)
+def test_bilibili_explicit_source_url_keeps_exact_query(
+    tmp_path: Path, source_url: str, final_url: str
+) -> None:
+    page = FakePage(
+        final_url=final_url,
+        dom_rows=[
+            {
+                "data-video-key": "BV1",
+                "data-title": "one",
+                "data-comment-count": "1",
+            }
+        ],
+    )
+    source = BrowserCandidateSource(
+        BrowserLaunchConfig(),
+        session=FakeSession(page),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        discover(
+            request(query=None, source_url=source_url, max_pages=1),
+            browser=source,
+            output_root=tmp_path,
+        )
+
+    assert page.locator_calls == []
+    assert not (tmp_path / "candidates").exists()
+
+
+def test_bilibili_explicit_source_url_preserves_query_pairs_when_paging(
+    tmp_path: Path,
+) -> None:
+    source_url = (
+        "https://search.bilibili.com/all?keyword=efficiency%20tools&tag=a&tag=b&empty=&page=1"
+    )
+    page = FakePage(final_url="about:blank")
+
+    class RecordingSession(FakeSession):
+        def __init__(self, browser_page: FakePage) -> None:
+            super().__init__(browser_page)
+            self.opened_urls: list[str] = []
+
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            self.opened_urls.append(url)
+            self.page.url = url
+            page_number = len(self.opened_urls)
+            response_url = (
+                "https://api.bilibili.com/x/web-interface/search/type"
+                f"?keyword=efficiency%20tools&page={page_number}"
+            )
+            assert adapter.response_kind(response_url) is not None
+            consume(response_url, bili_payload((f"BV{page_number}", "one", 1)))
+
+    session = RecordingSession(page)
+    source = BrowserCandidateSource(
+        BrowserLaunchConfig(),
+        session=session,  # type: ignore[arg-type]
+    )
+
+    result = discover(
+        request(query=None, source_url=source_url, max_pages=2),
+        browser=source,
+        output_root=tmp_path,
+    )
+
+    assert session.opened_urls == [
+        source_url,
+        source_url.removesuffix("page=1") + "page=2",
+    ]
+    assert [str(candidate.source_page) for candidate in result.candidates] == session.opened_urls
+
+
+@pytest.mark.parametrize(
+    "final_url",
+    [
+        "https://search.bilibili.com/all",
+        "https://search.bilibili.com/all?keyword=other",
+        "https://search.bilibili.com/account/login?keyword=efficiency%20tools",
+    ],
+)
+def test_bilibili_first_page_rejects_other_navigation_changes(
+    tmp_path: Path, final_url: str
+) -> None:
+    page = FakePage(
+        final_url=final_url,
         dom_rows=[
             {
                 "data-video-key": "BV1",
@@ -483,6 +613,49 @@ def test_same_site_login_redirect_fails_before_dom_fallback(tmp_path: Path) -> N
         discover(request(max_pages=1), browser=source, output_root=tmp_path)
 
     assert page.locator_calls == []
+    assert not (tmp_path / "candidates").exists()
+
+
+@pytest.mark.parametrize(
+    "second_page_url",
+    [
+        "https://search.bilibili.com/all?keyword=efficiency%20tools",
+        "https://search.bilibili.com/all?keyword=efficiency%20tools&page=3",
+    ],
+)
+def test_bilibili_later_page_requires_exact_page_number(
+    tmp_path: Path, second_page_url: str
+) -> None:
+    page = FakePage(final_url="about:blank")
+
+    class SequencedSession(FakeSession):
+        def __init__(self, browser_page: FakePage) -> None:
+            super().__init__(browser_page)
+            self.open_count = 0
+
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            del url
+            self.open_count += 1
+            self.page.url = (
+                "https://search.bilibili.com/all?keyword=efficiency%20tools"
+                if self.open_count == 1
+                else second_page_url
+            )
+            response_url = (
+                "https://api.bilibili.com/x/web-interface/search/type"
+                f"?keyword=efficiency%20tools&page={self.open_count}"
+            )
+            assert adapter.response_kind(response_url) is not None
+            consume(response_url, bili_payload((f"BV{self.open_count}", "one", 1)))
+
+    source = BrowserCandidateSource(
+        BrowserLaunchConfig(),
+        session=SequencedSession(page),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        discover(request(max_pages=2), browser=source, output_root=tmp_path)
+
     assert not (tmp_path / "candidates").exists()
 
 
