@@ -277,7 +277,7 @@ git commit -m "feat(collector): validate pilot coverage plan"
 - Modify: `packages/collector/README.md`
 - Create: `packages/collector/tests/candidates/test_cli.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_discover_requires_exactly_one_source() -> None:
@@ -294,23 +294,23 @@ def test_discover_does_not_expose_batch_confirmation_flag(parser: ArgumentParser
     assert "--auto-batch" not in parser.format_help()
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/candidates/test_cli.py -q`
 
 Expected: commands are not registered.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add `discover` with mutually exclusive required `--query`/`--source-url`, required platform/direction, bounded `--max-results` default 50, and the same validated `--browser`/`--reuse-login` options as `pilot`. Add `validate-plan PATH`; output ASCII summary JSON and return 0 only when coverage is complete. README shows candidate review as a distinct manual step before `batch`.
 
-- [ ] **Step 4: Run CLI and complete collector gate**
+- [x] **Step 4: Run CLI and complete collector gate**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests -q && uv run --project packages/collector ruff check packages/collector && uv run --project packages/collector ruff format --check packages/collector && uv run --project packages/collector mypy packages/collector/src && uv lock --project packages/collector --check && git diff --check`
 
 Expected: all collector tests pass; no CLI path can chain discovery into batch.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector
