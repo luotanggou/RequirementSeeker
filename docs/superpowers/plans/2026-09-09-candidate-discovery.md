@@ -104,7 +104,7 @@ git commit -m "feat(collector): add candidate manifest contracts"
 - Create: `packages/collector/tests/fixtures/bilibili/candidates.json`
 - Create: `packages/collector/tests/fixtures/douyin/candidates.json`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_bilibili_candidates_keep_page_rank_and_query() -> None:
@@ -123,13 +123,13 @@ def test_unknown_candidate_shape_closes() -> None:
         parse_bilibili_candidates({"data": {"unknown": []}}, "query", SOURCE, NOW)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/candidates/test_adapters.py -q`
 
 Expected: candidate adapter import fails.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Recognize only the candidate arrays observed in the artificial fixtures. Map stable video key, public URL, title, reported comment count and current page rank. Reject missing key/title and unknown successful shapes. Never traverse or retain payload keys named `comments`, `replies`, `comment_list`, or `reply_list`.
 
@@ -148,13 +148,13 @@ def reject_comment_payload(value: object) -> None:
             reject_comment_payload(child)
 ```
 
-- [ ] **Step 4: Run adapter tests**
+- [x] **Step 4: Run adapter tests**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/candidates/test_adapters.py -q`
 
 Expected: both platforms parse and forbidden comment payloads close.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector/src/requirementseeker_collector/candidates/adapters.py packages/collector/tests/candidates/test_adapters.py packages/collector/tests/fixtures
