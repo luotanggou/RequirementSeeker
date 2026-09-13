@@ -77,13 +77,42 @@ redirect through a symlink/junction/reparse point, or overlap artifact, run, or 
 Run reports contain only the browser enum and `ephemeral|dedicated` session mode, never a
 profile path.
 
-Run an approved version `1.0` manifest in file order:
+Discover candidate metadata from one explicit query for manual review:
+
+```sh
+uv run --project packages/collector rs-collect discover \
+  --platform bilibili \
+  --direction software_tools \
+  --query "AI tools" \
+  --max-pages 3 \
+  --max-results 50
+```
+
+Discovery accepts exactly one of `--query` or `--source-url`. It writes a candidate manifest and
+audit report under `.local-data/m2-real/candidates/<run-id>/`; it does not read comment bodies,
+approve candidates, or start a batch. The default is ephemeral Chromium. As with `pilot`, only an
+explicit `--browser chrome|edge --reuse-login` selection uses the platform's dedicated saved
+profile.
+
+Review the discovery files, assemble a separate collection manifest, and validate its exact
+24-video coverage:
+
+```sh
+uv run --project packages/collector rs-collect validate-plan path/to/manifest.json
+```
+
+The validation command exits successfully only for exact 24-video, 12/12 platform,
+6/6/4/4/4 direction, and 8/8/8 comment-scale coverage. It reports gaps but never changes or
+approves the manifest.
+
+Only after the candidate review, coverage validation, and explicit user approval, run the approved
+version `1.0` manifest in file order:
 
 ```sh
 uv run --project packages/collector rs-collect batch path/to/manifest.json
 ```
 
-Both commands print only a compact JSON summary. A fatal login, unresolved challenge, access
+All commands print only a compact ASCII JSON summary. A fatal login, unresolved challenge, access
 restriction, or response-shape change stops later videos for that platform while allowing the
 other platform to continue.
 

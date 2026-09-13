@@ -9,7 +9,9 @@ from typing import Never, cast
 
 from pydantic import ValidationError
 
-from .browser import BrowserName
+from .browser import BrowserLaunchConfig, BrowserName
+from .candidates.coverage import validate_coverage
+from .candidates.discovery import DiscoveryRequest, discover
 from .contracts import CollectionManifest
 from .runner import (
     BrowserVideoCollector,
@@ -55,6 +57,21 @@ def _parser() -> argparse.ArgumentParser:
     batch.add_argument("--output-root", default=".local-data/m2-real")
     batch.add_argument("--browser", choices=("chromium", "chrome", "edge"), default="chromium")
     batch.add_argument("--reuse-login", action="store_true")
+
+    discovery = commands.add_parser("discover", help="Discover candidates for manual review")
+    discovery.add_argument("--platform", required=True)
+    discovery.add_argument("--direction", required=True)
+    source = discovery.add_mutually_exclusive_group(required=True)
+    source.add_argument("--query")
+    source.add_argument("--source-url")
+    discovery.add_argument("--max-pages", type=int, default=3)
+    discovery.add_argument("--max-results", type=int, default=50)
+    discovery.add_argument("--output-root", default=".local-data/m2-real")
+    discovery.add_argument("--browser", choices=("chromium", "chrome", "edge"), default="chromium")
+    discovery.add_argument("--reuse-login", action="store_true")
+
+    validate = commands.add_parser("validate-plan", help="Validate 24-video plan coverage")
+    validate.add_argument("manifest")
     return parser
 
 
@@ -115,6 +132,15 @@ def main(argv: list[str] | None = None) -> int:
         _emit({"status": "invalid_request"})
         return 2
 
+    if args.command == "validate-plan":
+        manifest = _read_manifest(Path(args.manifest))
+        if manifest is None:
+            _emit({"status": "manifest_invalid"})
+            return 2
+        report = validate_coverage(manifest)
+        _emit(report.model_dump(mode="json"))
+        return 0 if report.valid else 1
+
     output_root = _output_root(args.output_root)
     if output_root is None:
         _emit({"status": "invalid_request"})
@@ -122,6 +148,48 @@ def main(argv: list[str] | None = None) -> int:
     if not _browser_mode_is_valid(args.browser, args.reuse_login):
         _emit({"status": "invalid_request"})
         return 2
+
+    if args.command == "discover":
+        try:
+            discovery_request = DiscoveryRequest.model_validate(
+                {
+                    "platform": args.platform,
+                    "direction": args.direction,
+                    "query": args.query,
+                    "source_url": args.source_url,
+                    "max_pages": args.max_pages,
+                    "max_results": args.max_results,
+                }
+            )
+            launch_config = (
+                BrowserLaunchConfig()
+                if args.browser == "chromium"
+                else BrowserLaunchConfig(
+                    browser=cast(BrowserName, args.browser),
+                    output_root=output_root,
+                    platform=discovery_request.platform,
+                )
+            )
+        except (ValidationError, ValueError):
+            _emit({"status": "invalid_request"})
+            return 2
+        try:
+            discovery_result = discover(
+                discovery_request, output_root=output_root, launch_config=launch_config
+            )
+        except Exception:
+            _emit({"status": "discovery_failed"})
+            return 1
+        _emit(
+            {
+                "candidate_count": len(discovery_result.candidates),
+                "discovery_path": str(discovery_result.discovery_path),
+                "manifest_path": str(discovery_result.manifest_path),
+                "pages_processed": discovery_result.pages_processed,
+                "status": "success",
+            }
+        )
+        return 0
 
     if args.command == "pilot":
         try:
