@@ -223,7 +223,7 @@ git commit -m "feat(collector): add audited candidate discovery"
 - Create: `packages/collector/src/requirementseeker_collector/candidates/coverage.py`
 - Create: `packages/collector/tests/candidates/test_coverage.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_complete_plan_has_no_gaps() -> None:
@@ -241,13 +241,13 @@ def test_coverage_reports_exact_gap(mutation: Callable[[CollectionManifest], Col
     assert code in [gap.code for gap in report.gaps]
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/candidates/test_coverage.py -q`
 
 Expected: coverage import fails.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Validate exact targets: 24 total; platform 12/12 unless a missing platform is explicitly listed; direction counts 6/6/4/4/4; scale counts 8/8/8. If a platform is listed unavailable, report `platform_unavailable` and keep `valid=False`; never redistribute its quota. Suggestions select unchosen candidates by missing direction, then missing scale, then source rank and video key; they do not mutate the manifest.
 
@@ -257,13 +257,13 @@ SCALE_TARGETS = {"up_to_200": 8, "201_to_2000": 8, "over_2000": 8}
 PLATFORM_TARGETS = {"bilibili": 12, "douyin": 12}
 ```
 
-- [ ] **Step 4: Run coverage tests**
+- [x] **Step 4: Run coverage tests**
 
 Run: `uv run --project packages/collector pytest packages/collector/tests/candidates/test_coverage.py -q`
 
 Expected: all exact gap reports pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/collector/src/requirementseeker_collector/candidates/coverage.py packages/collector/tests/candidates/test_coverage.py
