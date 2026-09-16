@@ -27,7 +27,13 @@ from playwright.sync_api import Page
 from pydantic import Field, TypeAdapter, ValidationError, model_validator
 
 from ..adapters.base import PlatformAdapter, ResponseKind, ResponseShapeChanged
-from ..browser import BrowserLaunchConfig, BrowserName, BrowserSession, SessionMode
+from ..browser import (
+    BrowserLaunchConfig,
+    BrowserName,
+    BrowserSession,
+    BrowserSessionError,
+    SessionMode,
+)
 from ..contracts import Contract, Direction, Platform, PublicHttpUrl
 from ..runner import _paths_are_safe_under
 from .adapters import CandidateShapeChanged, parse_bilibili_candidates, parse_douyin_candidates
@@ -193,8 +199,7 @@ def _search_url(request: DiscoveryRequest, page_number: int) -> str:
     encoded = quote(request.query, safe="")
     if request.platform == "bilibili":
         return f"https://search.bilibili.com/video?keyword={encoded}&page={page_number}"
-    suffix = "" if page_number == 1 else f"?page={page_number}"
-    return f"https://www.douyin.com/search/{encoded}{suffix}"
+    return f"https://www.douyin.com/search/{encoded}?type=general&page={page_number}"
 
 
 def _is_candidate_endpoint(platform: Platform, url: str) -> bool:
@@ -233,13 +238,8 @@ class _CandidateResponseAdapter:
     expected_query: str | None
     page_number: int
 
-    def response_kind(self, url: str) -> ResponseKind | None:
-        if not _is_candidate_endpoint(self.platform, url) or self.expected_query is None:
-            return None
-        if _one_query_value(url, "keyword") != self.expected_query:
-            return None
-        if self.platform == "bilibili":
-            return "comments" if _one_query_value(url, "page") == str(self.page_number) else None
+    @staticmethod
+    def _douyin_batch(url: str) -> tuple[int, int] | None:
         raw_offset = _one_query_value(url, "offset")
         raw_count = _one_query_value(url, "count")
         try:
@@ -247,8 +247,28 @@ class _CandidateResponseAdapter:
             count = int(raw_count) if raw_count is not None else 0
         except ValueError:
             return None
-        expected_offset = (self.page_number - 1) * count
-        return "comments" if count > 0 and offset == expected_offset else None
+        if count <= 0 or offset < count or offset % count:
+            return None
+        return offset, count
+
+    def response_kind(self, url: str) -> ResponseKind | None:
+        if not _is_candidate_endpoint(self.platform, url) or self.expected_query is None:
+            return None
+        if _one_query_value(url, "keyword") != self.expected_query:
+            return None
+        if self.platform == "bilibili":
+            return "comments" if _one_query_value(url, "page") == str(self.page_number) else None
+        return "comments" if self._douyin_batch(url) is not None else None
+
+    def matches_current_page(self, url: str) -> bool:
+        if self.response_kind(url) is None:
+            return False
+        if self.platform == "bilibili":
+            return True
+        batch = self._douyin_batch(url)
+        assert batch is not None
+        offset, count = batch
+        return offset == self.page_number * count
 
 
 def _bilibili_card_payload(page: Page) -> CandidatePayload | None:
@@ -342,6 +362,7 @@ def _validate_navigated_url(
     actual_url: str,
     *,
     allow_bilibili_implicit_page_one: bool = False,
+    allow_douyin_implicit_page: bool = False,
     require_exact_query: bool = False,
 ) -> None:
     try:
@@ -364,6 +385,13 @@ def _validate_navigated_url(
                 and allow_bilibili_implicit_page_one
                 and key == "page"
                 and values == ["1"]
+                and key not in actual_query
+            )
+            and not (
+                platform == "douyin"
+                and allow_douyin_implicit_page
+                and key == "page"
+                and len(values) == 1
                 and key not in actual_query
             )
             for key, values in requested_query.items()
@@ -393,30 +421,57 @@ def _capture_candidate_payloads(
     raise_if_response_failed: Callable[[], None],
 ) -> list[CandidatePayload]:
     captured: list[CandidatePayload] = []
-
-    def consume(response_url: str, payload: object) -> None:
-        del response_url
-        if not isinstance(payload, Mapping):
-            raise ResponseShapeChanged("response_shape_changed")
-        captured.append(payload)
-
+    candidate_shape_changed = False
     matcher = _CandidateResponseAdapter(
         request.platform,
         _expected_query(request, source_page),
         page_number,
     )
+
+    def consume(response_url: str, payload: object) -> None:
+        nonlocal candidate_shape_changed
+        if not isinstance(payload, Mapping):
+            raise ResponseShapeChanged("response_shape_changed")
+        if request.platform == "douyin":
+            try:
+                parse_douyin_candidates(
+                    payload,
+                    request.query,
+                    source_page,
+                    datetime.now(UTC),
+                    direction=request.direction,
+                )
+            except CandidateShapeChanged:
+                candidate_shape_changed = True
+                raise ResponseShapeChanged("response_shape_changed") from None
+        if matcher.matches_current_page(response_url):
+            captured.append(payload)
+
+    def preserve_candidate_shape(operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        try:
+            result = operation(*args, **kwargs)
+        except (BrowserSessionError, ResponseShapeChanged):
+            if candidate_shape_changed:
+                raise CandidateShapeChanged("candidate_shape_changed") from None
+            raise
+        if candidate_shape_changed:
+            raise CandidateShapeChanged("candidate_shape_changed") from None
+        return result
+
     allow_bilibili_implicit_page_one = (
         request.platform == "bilibili" and request.query is not None and page_number == 1
     )
-    open_page(source_page, cast(PlatformAdapter, matcher), consume)
+    allow_douyin_implicit_page = request.platform == "douyin" and request.query is not None
+    preserve_candidate_shape(open_page, source_page, cast(PlatformAdapter, matcher), consume)
     _validate_navigated_url(
         request.platform,
         source_page,
         page.url,
         allow_bilibili_implicit_page_one=allow_bilibili_implicit_page_one,
+        allow_douyin_implicit_page=allow_douyin_implicit_page,
         require_exact_query=request.source_url is not None,
     )
-    raise_if_response_failed()
+    preserve_candidate_shape(raise_if_response_failed)
 
     dom = None if captured else _dom_payload(page, request.platform)
     deadline = monotonic() + 5.0
@@ -427,26 +482,30 @@ def _capture_candidate_payloads(
         if remaining_seconds <= 0:
             break
         remaining_ms = min(50.0, remaining_seconds * 1000)
-        page.wait_for_timeout(remaining_ms)
-        raise_if_response_failed()
+        preserve_candidate_shape(page.wait_for_timeout, remaining_ms)
+        preserve_candidate_shape(raise_if_response_failed)
         _validate_navigated_url(
             request.platform,
             source_page,
             page.url,
             allow_bilibili_implicit_page_one=allow_bilibili_implicit_page_one,
+            allow_douyin_implicit_page=allow_douyin_implicit_page,
             require_exact_query=request.source_url is not None,
         )
         if not captured:
             dom = _dom_payload(page, request.platform)
 
     if captured:
-        wait_for_response_processing(quiet_seconds=0.75, timeout_seconds=2.0)
-    raise_if_response_failed()
+        preserve_candidate_shape(
+            wait_for_response_processing, quiet_seconds=0.75, timeout_seconds=2.0
+        )
+    preserve_candidate_shape(raise_if_response_failed)
     _validate_navigated_url(
         request.platform,
         source_page,
         page.url,
         allow_bilibili_implicit_page_one=allow_bilibili_implicit_page_one,
+        allow_douyin_implicit_page=allow_douyin_implicit_page,
         require_exact_query=request.source_url is not None,
     )
     if not captured and dom is not None:

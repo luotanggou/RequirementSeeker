@@ -1,5 +1,5 @@
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -8,14 +8,21 @@ from unittest.mock import Mock
 import pytest
 from pydantic import ValidationError
 
+import requirementseeker_collector.browser as browser_module
 import requirementseeker_collector.candidates.discovery as discovery_module
 from requirementseeker_collector.adapters.base import ResponseShapeChanged
-from requirementseeker_collector.browser import BrowserLaunchConfig, BrowserSessionError
+from requirementseeker_collector.browser import (
+    BrowserLaunchConfig,
+    BrowserSession,
+    BrowserSessionError,
+)
 from requirementseeker_collector.candidates.adapters import CandidateShapeChanged
 from requirementseeker_collector.candidates.discovery import (
     BrowserCandidateSource,
     CandidatePage,
     DiscoveryRequest,
+    _CandidateResponseAdapter,
+    _capture_candidate_payloads,
     _dom_payload,
     _search_url,
     discover,
@@ -60,6 +67,17 @@ def douyin_payload(*items: tuple[str, str, int]) -> dict[str, object]:
             for video_key, title, count in items
         ],
     }
+
+
+class UnreadableCommentPayload(Mapping[str, object]):
+    def __getitem__(self, key: str) -> object:
+        raise AssertionError(f"comment body was read through key {key!r}")
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("comments",))
+
+    def __len__(self) -> int:
+        return 1
 
 
 @dataclass
@@ -271,6 +289,77 @@ def test_bilibili_query_uses_video_search_pages() -> None:
     assert _search_url(discovery_request, 2) == (
         "https://search.bilibili.com/video?keyword=efficiency%20tools&page=2"
     )
+
+
+def test_douyin_query_uses_audited_general_search_pages() -> None:
+    discovery_request = request(platform="douyin", max_pages=2)
+
+    assert _search_url(discovery_request, 1) == (
+        "https://www.douyin.com/search/efficiency%20tools?type=general&page=1"
+    )
+    assert _search_url(discovery_request, 2) == (
+        "https://www.douyin.com/search/efficiency%20tools?type=general&page=2"
+    )
+
+
+@pytest.mark.parametrize(
+    ("page_number", "accepted_offset", "rejected_offsets"),
+    [
+        (1, 10, [0, 20]),
+        (2, 20, [10]),
+        (3, 30, [20]),
+    ],
+)
+def test_douyin_single_response_uses_one_based_offset_batches(
+    page_number: int, accepted_offset: int, rejected_offsets: list[int]
+) -> None:
+    adapter = _CandidateResponseAdapter("douyin", "efficiency tools", page_number)
+
+    def response_url(offset: int) -> str:
+        return (
+            "https://www.douyin.com/aweme/v1/web/general/search/single/"
+            f"?keyword=efficiency%20tools&count=10&offset={offset}"
+        )
+
+    assert adapter.response_kind(response_url(accepted_offset)) == "comments"
+    assert adapter.matches_current_page(response_url(accepted_offset)) is True
+    for offset in rejected_offsets:
+        expected_kind = None if offset == 0 else "comments"
+        assert adapter.response_kind(response_url(offset)) == expected_kind
+        assert adapter.matches_current_page(response_url(offset)) is False
+
+
+@pytest.mark.parametrize(
+    "response_url",
+    [
+        (
+            "https://www.douyin.com/aweme/v1/web/general/search/stream/"
+            "?keyword=efficiency%20tools&count=10&offset=10"
+        ),
+        (
+            "https://www.douyin.com/aweme/v1/web/general/search/single/"
+            "?keyword=other&count=10&offset=10"
+        ),
+        (
+            "https://www.douyin.com/aweme/v1/web/general/search/single/"
+            "?keyword=efficiency%20tools&keyword=other&count=10&offset=10"
+        ),
+        (
+            "https://www.douyin.com/aweme/v1/web/general/search/single/"
+            "?keyword=efficiency%20tools&count=10&count=10&offset=10"
+        ),
+        (
+            "https://www.douyin.com/aweme/v1/web/general/search/single/"
+            "?keyword=efficiency%20tools&count=10&offset=10&offset=10"
+        ),
+    ],
+)
+def test_douyin_single_response_keeps_strict_endpoint_and_query_bounds(
+    response_url: str,
+) -> None:
+    adapter = _CandidateResponseAdapter("douyin", "efficiency tools", 1)
+
+    assert adapter.response_kind(response_url) is None
 
 
 def test_bilibili_dom_reads_only_trusted_cards_in_page_order() -> None:
@@ -757,12 +846,14 @@ def test_injected_candidate_page_must_match_explicit_source_url(tmp_path: Path) 
     assert not (tmp_path / "candidates").exists()
 
 
-def test_injected_douyin_candidate_page_accepts_matching_offset(tmp_path: Path) -> None:
+def test_injected_douyin_candidate_page_accepts_matching_audited_page(tmp_path: Path) -> None:
     browser = FakeBrowser(
         [
             CandidatePage(
                 page_number=2,
-                source_page=("https://www.douyin.com/search/efficiency%20tools?offset=12&count=12"),
+                source_page=(
+                    "https://www.douyin.com/search/efficiency%20tools?type=general&page=2"
+                ),
                 payload=douyin_payload(("7390000000000000001", "one", 1)),
             )
         ]
@@ -776,6 +867,29 @@ def test_injected_douyin_candidate_page_accepts_matching_offset(tmp_path: Path) 
 
     assert [item.video_key for item in result.candidates] == ["7390000000000000001"]
     assert result.pages_processed == 1
+
+
+def test_injected_douyin_candidate_page_cannot_claim_later_page_without_audit_parameter(
+    tmp_path: Path,
+) -> None:
+    browser = FakeBrowser(
+        [
+            CandidatePage(
+                page_number=2,
+                source_page=("https://www.douyin.com/search/efficiency%20tools?type=general"),
+                payload=douyin_payload(("7390000000000000001", "one", 1)),
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="^candidate_source_page_mismatch$"):
+        discover(
+            request(platform="douyin", max_pages=2),
+            browser=browser,
+            output_root=tmp_path,
+        )
+
+    assert not (tmp_path / "candidates").exists()
 
 
 def test_cross_site_redirect_fails_before_dom_fallback(tmp_path: Path) -> None:
@@ -1012,18 +1126,23 @@ def test_unrelated_candidate_response_is_ignored_before_publishing(
     assert not (tmp_path / "candidates").exists()
 
 
-def test_douyin_candidate_response_must_match_query_and_page_offset(tmp_path: Path) -> None:
+def test_douyin_candidate_response_must_match_first_observed_batch(tmp_path: Path) -> None:
     page = FakePage(
-        final_url="https://www.douyin.com/search/efficiency%20tools",
+        final_url="https://www.douyin.com/search/efficiency%20tools?type=general",
         responses=[
             (
                 "https://www.douyin.com/aweme/v1/web/general/search/single/"
-                "?keyword=efficiency%20tools&offset=0&count=12",
+                "?keyword=efficiency%20tools&offset=0&count=10",
+                douyin_payload(("7390000000000000098", "zero offset", 1)),
+            ),
+            (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&offset=10&count=10",
                 douyin_payload(("7390000000000000001", "one", 1)),
             ),
             (
                 "https://www.douyin.com/aweme/v1/web/general/search/single/"
-                "?keyword=efficiency%20tools&offset=12&count=12",
+                "?keyword=efficiency%20tools&offset=20&count=10",
                 douyin_payload(("7390000000000000099", "wrong page", 1)),
             ),
         ],
@@ -1040,6 +1159,416 @@ def test_douyin_candidate_response_must_match_query_and_page_offset(tmp_path: Pa
     )
 
     assert [item.video_key for item in result.candidates] == ["7390000000000000001"]
+
+
+def test_douyin_query_paging_keeps_audited_urls_after_canonical_navigation(
+    tmp_path: Path,
+) -> None:
+    page = FakePage(final_url="about:blank")
+
+    class SequencedSession(FakeSession):
+        def __init__(self, browser_page: FakePage) -> None:
+            super().__init__(browser_page)
+            self.opened_urls: list[str] = []
+
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            self.opened_urls.append(url)
+            self.page.url = "https://www.douyin.com/search/efficiency%20tools?type=general"
+            page_number = len(self.opened_urls)
+            if page_number == 2:
+                late_url = (
+                    "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                    "?keyword=efficiency%20tools&count=10&offset=10"
+                )
+                assert adapter.response_kind(late_url) == "comments"
+                consume(
+                    late_url,
+                    douyin_payload(("7390000000000000099", "late previous page", 99)),
+                )
+            response_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                f"?keyword=efficiency%20tools&count=10&offset={page_number * 10}"
+            )
+            assert adapter.response_kind(response_url) == "comments"
+            consume(
+                response_url,
+                douyin_payload((f"739000000000000000{page_number}", "current", page_number)),
+            )
+
+    session = SequencedSession(page)
+    source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
+
+    result = discover(
+        request(platform="douyin", max_pages=2),
+        browser=source,
+        output_root=tmp_path,
+    )
+
+    assert session.opened_urls == [
+        "https://www.douyin.com/search/efficiency%20tools?type=general&page=1",
+        "https://www.douyin.com/search/efficiency%20tools?type=general&page=2",
+    ]
+    assert [str(item.source_page) for item in result.candidates] == session.opened_urls
+
+
+def test_douyin_future_batch_is_awaited_without_polluting_current_page(
+    tmp_path: Path,
+) -> None:
+    page = FakePage(final_url="about:blank")
+
+    class PrefetchSession(FakeSession):
+        def __init__(self, browser_page: FakePage) -> None:
+            super().__init__(browser_page)
+            self.open_count = 0
+            self.future: tuple[str, Any, Any] | None = None
+            self.future_settled = False
+
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            self.open_count += 1
+            self.page.url = "https://www.douyin.com/search/efficiency%20tools?type=general"
+            offset = self.open_count * 10
+            current_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                f"?keyword=efficiency%20tools&count=10&offset={offset}"
+            )
+            assert adapter.response_kind(current_url) == "comments"
+            consume(
+                current_url,
+                douyin_payload((f"739000000000000000{self.open_count}", "current", 1)),
+            )
+            if self.open_count == 1:
+                future_url = (
+                    "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                    "?keyword=efficiency%20tools&count=10&offset=20"
+                )
+                assert adapter.response_kind(future_url) == "comments"
+                self.future = (future_url, adapter, consume)
+            else:
+                assert self.future_settled is True
+
+        def wait_for_response_processing(self, **kwargs: float) -> None:
+            super().wait_for_response_processing(**kwargs)
+            if self.future is not None:
+                response_url, adapter, consume = self.future
+                assert adapter.response_kind(response_url) == "comments"
+                consume(
+                    response_url,
+                    douyin_payload(("7390000000000000098", "prefetched future", 98)),
+                )
+                self.future = None
+                self.future_settled = True
+
+    session = PrefetchSession(page)
+    source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
+
+    result = discover(
+        request(platform="douyin", max_pages=2),
+        browser=source,
+        output_root=tmp_path,
+    )
+
+    assert session.future_settled is True
+    assert [item.video_key for item in result.candidates] == [
+        "7390000000000000001",
+        "7390000000000000002",
+    ]
+
+
+def test_real_browser_session_awaits_inflight_douyin_prefetch_before_next_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = 0.0
+    callbacks: dict[str, Any] = {}
+    future: dict[str, Any] = {}
+    navigation_count = 0
+    page = Mock()
+    context = Mock()
+    page.url = "about:blank"
+    page.on.side_effect = lambda event, callback: callbacks.__setitem__(event, callback)
+    context.on.side_effect = lambda event, callback: callbacks.__setitem__(event, callback)
+
+    def response(url: str, payload: Mapping[str, object]) -> Mock:
+        value = Mock(url=url)
+        value.json.return_value = payload
+        return value
+
+    def goto(url: str) -> None:
+        nonlocal navigation_count
+        navigation_count += 1
+        if navigation_count == 2:
+            assert future.get("settled") is True
+        page.url = "https://www.douyin.com/search/efficiency%20tools?type=general"
+        current_url = (
+            "https://www.douyin.com/aweme/v1/web/general/search/single/"
+            f"?keyword=efficiency%20tools&count=10&offset={navigation_count * 10}"
+        )
+        current_request = Mock(url=current_url)
+        callbacks["request"](current_request)
+        callbacks["response"](
+            response(
+                current_url,
+                douyin_payload((f"739000000000000000{navigation_count}", "current", 1)),
+            )
+        )
+        callbacks["requestfinished"](current_request)
+        if navigation_count == 1:
+            future_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&count=10&offset=20"
+            )
+            future_request = Mock(url=future_url)
+            future_response = response(
+                future_url,
+                douyin_payload(("7390000000000000098", "prefetched future", 98)),
+            )
+            future.update(
+                url=future_url,
+                request=future_request,
+                response=future_response,
+                settled=False,
+            )
+            callbacks["request"](future_request)
+
+    def wait_for_timeout(timeout: float) -> None:
+        nonlocal clock
+        clock += timeout / 1000
+        if future and not future["settled"] and clock >= 1.0:
+            callbacks["response"](future["response"])
+            callbacks["requestfinished"](future["request"])
+            future["settled"] = True
+
+    page.goto.side_effect = goto
+    page.wait_for_timeout.side_effect = wait_for_timeout
+    monkeypatch.setattr(browser_module, "monotonic", lambda: clock)
+
+    session = BrowserSession(Mock())
+    session._page = page
+    session._context = context
+    discovery_request = request(platform="douyin", max_pages=2)
+    captured: list[list[Mapping[str, object]]] = []
+    for page_number in (1, 2):
+        source_page = _search_url(discovery_request, page_number)
+        captured.append(
+            _capture_candidate_payloads(
+                page,
+                discovery_request,
+                source_page,
+                page_number,
+                session.open,
+                session.wait_for_response_processing,
+                session.raise_if_response_failed,
+            )
+        )
+
+    assert future["settled"] is True
+    future["response"].json.assert_called_once_with()
+    assert [payload[0]["data"][0]["aweme_info"]["aweme_id"] for payload in captured] == [
+        "7390000000000000001",
+        "7390000000000000002",
+    ]
+
+
+def test_douyin_future_batch_shape_failure_fails_closed(tmp_path: Path) -> None:
+    page = FakePage(final_url="about:blank")
+
+    class FutureShapeFailureSession(FakeSession):
+        def __init__(self, browser_page: FakePage) -> None:
+            super().__init__(browser_page)
+            self.delayed_responses: list[tuple[str, object]] = []
+
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            del url
+            self.page.url = "https://www.douyin.com/search/efficiency%20tools?type=general"
+            self.consume = consume
+            current_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&count=10&offset=10"
+            )
+            assert adapter.response_kind(current_url) == "comments"
+            consume(current_url, douyin_payload(("7390000000000000001", "current", 1)))
+            future_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&count=10&offset=20"
+            )
+            if adapter.response_kind(future_url) is not None:
+                self.delayed_responses = [(future_url, [])]
+
+        def wait_for_response_processing(self, **kwargs: float) -> None:
+            assert kwargs == {"quiet_seconds": 0.75, "timeout_seconds": 2.0}
+            for response_url, payload in self.delayed_responses:
+                self.consume(response_url, payload)
+
+    session = FutureShapeFailureSession(page)
+    source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(ResponseShapeChanged, match="^response_shape_changed$"):
+        discover(
+            request(platform="douyin", max_pages=1),
+            browser=source,
+            output_root=tmp_path,
+        )
+
+    assert not (tmp_path / "candidates").exists()
+
+
+@pytest.mark.parametrize(
+    "future_payload",
+    [
+        {"status_code": 0, "unknown": []},
+        {"status_code": 1, "data": []},
+        {"status_code": 0, "data": {}},
+        {"status_code": 0, "data": [{"unknown": {}}]},
+        UnreadableCommentPayload(),
+    ],
+    ids=["unknown", "status", "data", "item", "comments"],
+)
+def test_douyin_future_mapping_must_pass_full_candidate_validation(
+    tmp_path: Path, future_payload: Mapping[str, object]
+) -> None:
+    page = FakePage(final_url="about:blank")
+
+    class FutureCandidateShapeSession(FakeSession):
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            del url
+            self.page.url = "https://www.douyin.com/search/efficiency%20tools?type=general"
+            self.consume = consume
+            current_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&count=10&offset=10"
+            )
+            consume(current_url, douyin_payload(("7390000000000000001", "current", 1)))
+            future_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&count=10&offset=20"
+            )
+            assert adapter.response_kind(future_url) == "comments"
+            self.delayed_responses = [(future_url, future_payload)]
+
+        def wait_for_response_processing(self, **kwargs: float) -> None:
+            assert kwargs == {"quiet_seconds": 0.75, "timeout_seconds": 2.0}
+            for response_url, payload in self.delayed_responses:
+                self.consume(response_url, payload)
+
+    source = BrowserCandidateSource(
+        BrowserLaunchConfig(),
+        session=FutureCandidateShapeSession(page),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        discover(
+            request(platform="douyin", max_pages=1),
+            browser=source,
+            output_root=tmp_path,
+        )
+
+    assert not (tmp_path / "candidates").exists()
+
+
+def test_douyin_future_batch_json_failure_fails_closed(tmp_path: Path) -> None:
+    page = FakePage(final_url="about:blank")
+
+    class FutureJsonFailureSession(FakeSession):
+        def __init__(self, browser_page: FakePage) -> None:
+            super().__init__(browser_page)
+            self.future_supported = False
+
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            del url
+            self.page.url = "https://www.douyin.com/search/efficiency%20tools?type=general"
+            current_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&count=10&offset=10"
+            )
+            consume(current_url, douyin_payload(("7390000000000000001", "current", 1)))
+            future_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&count=10&offset=20"
+            )
+            self.future_supported = adapter.response_kind(future_url) is not None
+
+        def wait_for_response_processing(self, **kwargs: float) -> None:
+            assert kwargs == {"quiet_seconds": 0.75, "timeout_seconds": 2.0}
+            if self.future_supported:
+                raise BrowserSessionError("response_processing_failed")
+
+    source = BrowserCandidateSource(
+        BrowserLaunchConfig(),
+        session=FutureJsonFailureSession(page),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(BrowserSessionError, match="^response_processing_failed$"):
+        discover(
+            request(platform="douyin", max_pages=1),
+            browser=source,
+            output_root=tmp_path,
+        )
+
+    assert not (tmp_path / "candidates").exists()
+
+
+def test_douyin_third_page_without_offset_thirty_fails_closed(tmp_path: Path) -> None:
+    page = FakePage(final_url="about:blank")
+
+    class MissingThirdBatchSession(FakeSession):
+        def __init__(self, browser_page: FakePage) -> None:
+            super().__init__(browser_page)
+            self.open_count = 0
+
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            del url
+            self.open_count += 1
+            self.page.url = "https://www.douyin.com/search/efficiency%20tools?type=general"
+            observed_offset = min(self.open_count, 2) * 10
+            response_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                f"?keyword=efficiency%20tools&count=10&offset={observed_offset}"
+            )
+            if adapter.response_kind(response_url) is not None:
+                consume(
+                    response_url,
+                    douyin_payload((f"739000000000000000{self.open_count}", "current", 1)),
+                )
+
+    source = BrowserCandidateSource(
+        BrowserLaunchConfig(),
+        session=MissingThirdBatchSession(page),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        discover(
+            request(platform="douyin", max_pages=3),
+            browser=source,
+            output_root=tmp_path,
+        )
+
+    assert not (tmp_path / "candidates").exists()
+
+
+def test_douyin_explicit_source_url_keeps_exact_page_query(tmp_path: Path) -> None:
+    source_url = "https://www.douyin.com/search/efficiency%20tools?type=general&page=1"
+    page = FakePage(
+        final_url="https://www.douyin.com/search/efficiency%20tools?type=general",
+        responses=[
+            (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&count=10&offset=10",
+                douyin_payload(("7390000000000000001", "one", 1)),
+            )
+        ],
+    )
+    source = BrowserCandidateSource(
+        BrowserLaunchConfig(),
+        session=FakeSession(page),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        discover(
+            request(platform="douyin", query=None, source_url=source_url, max_pages=1),
+            browser=source,
+            output_root=tmp_path,
+        )
+
+    assert not (tmp_path / "candidates").exists()
 
 
 def test_empty_page_fails_closed_before_publishing(tmp_path: Path) -> None:
@@ -1134,7 +1663,7 @@ def test_douyin_waits_for_first_candidate_response_then_collects_quiet_window(
 ) -> None:
     clock = Mock(return_value=0.0)
     elapsed = 0.0
-    page = FakePage(final_url="https://www.douyin.com/search/efficiency%20tools")
+    page = FakePage(final_url="https://www.douyin.com/search/efficiency%20tools?type=general")
 
     class DelayedFirstResponseSession(FakeSession):
         def __init__(self, browser_page: FakePage) -> None:
@@ -1153,7 +1682,7 @@ def test_douyin_waits_for_first_candidate_response_then_collects_quiet_window(
                     self.first_sent = True
                     response_url = (
                         "https://www.douyin.com/aweme/v1/web/general/search/single/"
-                        "?keyword=efficiency%20tools&offset=0&count=12"
+                        "?keyword=efficiency%20tools&offset=12&count=12"
                     )
                     assert self.adapter.response_kind(response_url) is not None
                     self.consume(
@@ -1168,7 +1697,7 @@ def test_douyin_waits_for_first_candidate_response_then_collects_quiet_window(
             assert kwargs == {"quiet_seconds": 0.75, "timeout_seconds": 2.0}
             response_url = (
                 "https://www.douyin.com/aweme/v1/web/general/search/single/"
-                "?keyword=efficiency%20tools&offset=0&count=12"
+                "?keyword=efficiency%20tools&offset=12&count=12"
             )
             assert self.adapter.response_kind(response_url) is not None
             self.consume(
@@ -1202,7 +1731,7 @@ def test_candidate_first_response_wait_is_bounded_and_publishes_nothing(
     def monotonic() -> float:
         return elapsed
 
-    page = FakePage(final_url="https://www.douyin.com/search/efficiency%20tools")
+    page = FakePage(final_url="https://www.douyin.com/search/efficiency%20tools?type=general")
 
     def wait_for_timeout(timeout: float) -> None:
         nonlocal elapsed
@@ -1237,7 +1766,7 @@ def test_delayed_matching_response_failure_is_preserved_without_artifacts(
     failure_type: type[Exception],
     message: str,
 ) -> None:
-    page = FakePage(final_url="https://www.douyin.com/search/efficiency%20tools")
+    page = FakePage(final_url="https://www.douyin.com/search/efficiency%20tools?type=general")
 
     class FailedResponseSession(FakeSession):
         def __init__(self, browser_page: FakePage) -> None:
@@ -1251,7 +1780,7 @@ def test_delayed_matching_response_failure_is_preserved_without_artifacts(
                 assert timeout > 0
                 response_url = (
                     "https://www.douyin.com/aweme/v1/web/general/search/single/"
-                    "?keyword=efficiency%20tools&offset=0&count=12"
+                    "?keyword=efficiency%20tools&offset=12&count=12"
                 )
                 assert self.adapter.response_kind(response_url) is not None
                 self.failed = True
