@@ -8,7 +8,9 @@ from unittest.mock import Mock
 import pytest
 from pydantic import ValidationError
 
-from requirementseeker_collector.browser import BrowserLaunchConfig
+import requirementseeker_collector.candidates.discovery as discovery_module
+from requirementseeker_collector.adapters.base import ResponseShapeChanged
+from requirementseeker_collector.browser import BrowserLaunchConfig, BrowserSessionError
 from requirementseeker_collector.candidates.adapters import CandidateShapeChanged
 from requirementseeker_collector.candidates.discovery import (
     BrowserCandidateSource,
@@ -247,6 +249,9 @@ class FakeSession:
         for response_url, payload in self.page.delayed_responses:
             if self.adapter.response_kind(response_url) is not None:
                 self.consume(response_url, payload)
+
+    def raise_if_response_failed(self) -> None:
+        pass
 
 
 def page(number: int, *items: tuple[str, str, int]) -> CandidatePage:
@@ -1061,7 +1066,22 @@ def test_delayed_candidate_response_is_collected_during_bounded_wait(tmp_path: P
             )
         ],
     )
-    session = FakeSession(page)
+
+    class DelayedResponseSession(FakeSession):
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            super().open(url, adapter, consume)
+
+            def wait_for_timeout(timeout: float) -> None:
+                assert timeout > 0
+                delayed = list(self.page.delayed_responses)
+                self.page.delayed_responses.clear()
+                for response_url, payload in delayed:
+                    if self.adapter.response_kind(response_url) is not None:
+                        self.consume(response_url, payload)
+
+            self.page.wait_for_timeout = wait_for_timeout  # type: ignore[method-assign]
+
+    session = DelayedResponseSession(page)
     source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
 
     result = discover(request(max_pages=1), browser=source, output_root=tmp_path)
@@ -1085,6 +1105,11 @@ def test_response_arriving_during_session_quiet_wait_is_collected(tmp_path: Path
             self.page.url = self.page.final_url
             self.adapter = adapter
             self.consume = consume
+            response_url = (
+                "https://api.bilibili.com/x/web-interface/search/type"
+                "?keyword=efficiency%20tools&page=1"
+            )
+            self.consume(response_url, bili_payload(("BV0", "initial", 1)))
 
         def wait_for_response_processing(self, **kwargs: float) -> None:
             super().wait_for_response_processing(**kwargs)
@@ -1100,8 +1125,187 @@ def test_response_arriving_during_session_quiet_wait_is_collected(tmp_path: Path
 
     result = discover(request(max_pages=1), browser=source, output_root=tmp_path)
 
-    assert [item.video_key for item in result.candidates] == ["BV1"]
+    assert [item.video_key for item in result.candidates] == ["BV0", "BV1"]
     assert session.bounded_wait_called is True
+
+
+def test_douyin_waits_for_first_candidate_response_then_collects_quiet_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Mock(return_value=0.0)
+    elapsed = 0.0
+    page = FakePage(final_url="https://www.douyin.com/search/efficiency%20tools")
+
+    class DelayedFirstResponseSession(FakeSession):
+        def __init__(self, browser_page: FakePage) -> None:
+            super().__init__(browser_page)
+            self.wait_calls = 0
+            self.first_sent = False
+
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            super().open(url, adapter, consume)
+
+            def wait_for_timeout(timeout: float) -> None:
+                nonlocal elapsed
+                elapsed += timeout / 1000
+                clock.return_value = elapsed
+                if elapsed >= 4.0 and not self.first_sent:
+                    self.first_sent = True
+                    response_url = (
+                        "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                        "?keyword=efficiency%20tools&offset=0&count=12"
+                    )
+                    assert self.adapter.response_kind(response_url) is not None
+                    self.consume(
+                        response_url,
+                        douyin_payload(("7390000000000000001", "first", 1)),
+                    )
+
+            self.page.wait_for_timeout = wait_for_timeout  # type: ignore[method-assign]
+
+        def wait_for_response_processing(self, **kwargs: float) -> None:
+            self.wait_calls += 1
+            assert kwargs == {"quiet_seconds": 0.75, "timeout_seconds": 2.0}
+            response_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&offset=0&count=12"
+            )
+            assert self.adapter.response_kind(response_url) is not None
+            self.consume(
+                response_url,
+                douyin_payload(("7390000000000000002", "second", 2)),
+            )
+
+    monkeypatch.setattr(discovery_module, "monotonic", clock, raising=False)
+    session = DelayedFirstResponseSession(page)
+    source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
+
+    result = discover(
+        request(platform="douyin", max_pages=1),
+        browser=source,
+        output_root=tmp_path,
+    )
+
+    assert [item.video_key for item in result.candidates] == [
+        "7390000000000000001",
+        "7390000000000000002",
+    ]
+    assert 4.0 <= elapsed <= 4.05
+    assert session.wait_calls == 1
+
+
+def test_candidate_first_response_wait_is_bounded_and_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    elapsed = 0.0
+
+    def monotonic() -> float:
+        return elapsed
+
+    page = FakePage(final_url="https://www.douyin.com/search/efficiency%20tools")
+
+    def wait_for_timeout(timeout: float) -> None:
+        nonlocal elapsed
+        elapsed += timeout / 1000
+
+    page.wait_for_timeout = wait_for_timeout  # type: ignore[method-assign]
+    monkeypatch.setattr(discovery_module, "monotonic", monotonic, raising=False)
+    session = FakeSession(page)
+    source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        discover(
+            request(platform="douyin", max_pages=1),
+            browser=source,
+            output_root=tmp_path,
+        )
+
+    assert elapsed == pytest.approx(5.0)
+    assert session.bounded_wait_called is False
+    assert not (tmp_path / "candidates").exists()
+
+
+@pytest.mark.parametrize(
+    ("failure_type", "message"),
+    [
+        (BrowserSessionError, "response_processing_failed"),
+        (ResponseShapeChanged, "response_shape_changed"),
+    ],
+)
+def test_delayed_matching_response_failure_is_preserved_without_artifacts(
+    tmp_path: Path,
+    failure_type: type[Exception],
+    message: str,
+) -> None:
+    page = FakePage(final_url="https://www.douyin.com/search/efficiency%20tools")
+
+    class FailedResponseSession(FakeSession):
+        def __init__(self, browser_page: FakePage) -> None:
+            super().__init__(browser_page)
+            self.failed = False
+
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            super().open(url, adapter, consume)
+
+            def wait_for_timeout(timeout: float) -> None:
+                assert timeout > 0
+                response_url = (
+                    "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                    "?keyword=efficiency%20tools&offset=0&count=12"
+                )
+                assert self.adapter.response_kind(response_url) is not None
+                self.failed = True
+
+            self.page.wait_for_timeout = wait_for_timeout  # type: ignore[method-assign]
+
+        def raise_if_response_failed(self) -> None:
+            if self.failed:
+                raise failure_type(message)
+
+    session = FailedResponseSession(page)
+    source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
+
+    with pytest.raises(failure_type, match=f"^{message}$"):
+        discover(
+            request(platform="douyin", max_pages=1),
+            browser=source,
+            output_root=tmp_path,
+        )
+
+    assert not (tmp_path / "candidates").exists()
+
+
+def test_bilibili_immediate_trusted_dom_skips_response_wait(tmp_path: Path) -> None:
+    card = bili_card(
+        [element(href="https://www.bilibili.com/video/BV1xx411c7mD")],
+        title="available immediately",
+    )
+
+    class ImmediateDomPage(FakePage):
+        def __init__(self) -> None:
+            super().__init__(
+                final_url=("https://search.bilibili.com/video?keyword=efficiency%20tools&page=1")
+            )
+            self.timeout_calls = 0
+
+        def wait_for_timeout(self, timeout: float) -> None:
+            del timeout
+            self.timeout_calls += 1
+
+        def locator(self, selector: str) -> Any:
+            if selector == ".bili-video-card":
+                return ElementLocator([card])
+            return ElementLocator([])
+
+    page = ImmediateDomPage()
+    session = FakeSession(page)
+    source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
+
+    result = discover(request(max_pages=1), browser=source, output_root=tmp_path)
+
+    assert [item.video_key for item in result.candidates] == ["BV1xx411c7mD"]
+    assert page.timeout_calls == 0
+    assert session.bounded_wait_called is False
 
 
 @pytest.mark.parametrize("use_response", [True, False])
@@ -1126,6 +1330,13 @@ def test_redirect_during_quiet_wait_fails_before_response_or_dom_publish(
     )
 
     class RedirectDuringWaitSession(FakeSession):
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            super().open(url, adapter, consume)
+            if not use_response:
+                self.page.wait_for_timeout = lambda timeout: setattr(  # type: ignore[method-assign]
+                    self.page, "url", "https://search.bilibili.com/account/login"
+                )
+
         def wait_for_response_processing(self, **kwargs: float) -> None:
             super().wait_for_response_processing(**kwargs)
             self.page.url = "https://search.bilibili.com/account/login"
@@ -1138,7 +1349,10 @@ def test_redirect_during_quiet_wait_fails_before_response_or_dom_publish(
     with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
         discover(request(max_pages=1), browser=source, output_root=tmp_path)
 
-    assert page.locator_calls == []
+    if use_response:
+        assert page.locator_calls == []
+    else:
+        assert page.locator_calls != []
     assert not (tmp_path / "candidates").exists()
 
 

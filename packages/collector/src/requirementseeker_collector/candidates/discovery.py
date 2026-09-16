@@ -9,6 +9,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Annotated, Any, Literal, Protocol, Self, cast
 from urllib.parse import (
     parse_qs,
@@ -389,6 +390,7 @@ def _capture_candidate_payloads(
     page_number: int,
     open_page: Callable[[str, PlatformAdapter, Callable[[str, object], None]], None],
     wait_for_response_processing: Callable[..., None],
+    raise_if_response_failed: Callable[[], None],
 ) -> list[CandidatePayload]:
     captured: list[CandidatePayload] = []
 
@@ -414,7 +416,32 @@ def _capture_candidate_payloads(
         allow_bilibili_implicit_page_one=allow_bilibili_implicit_page_one,
         require_exact_query=request.source_url is not None,
     )
-    wait_for_response_processing(quiet_seconds=0.75, timeout_seconds=5.0)
+    raise_if_response_failed()
+
+    dom = None if captured else _dom_payload(page, request.platform)
+    deadline = monotonic() + 5.0
+    for _ in range(100):
+        if captured or dom is not None:
+            break
+        remaining_seconds = deadline - monotonic()
+        if remaining_seconds <= 0:
+            break
+        remaining_ms = min(50.0, remaining_seconds * 1000)
+        page.wait_for_timeout(remaining_ms)
+        raise_if_response_failed()
+        _validate_navigated_url(
+            request.platform,
+            source_page,
+            page.url,
+            allow_bilibili_implicit_page_one=allow_bilibili_implicit_page_one,
+            require_exact_query=request.source_url is not None,
+        )
+        if not captured:
+            dom = _dom_payload(page, request.platform)
+
+    if captured:
+        wait_for_response_processing(quiet_seconds=0.75, timeout_seconds=2.0)
+    raise_if_response_failed()
     _validate_navigated_url(
         request.platform,
         source_page,
@@ -422,10 +449,8 @@ def _capture_candidate_payloads(
         allow_bilibili_implicit_page_one=allow_bilibili_implicit_page_one,
         require_exact_query=request.source_url is not None,
     )
-    if not captured:
-        dom = _dom_payload(page, request.platform)
-        if dom is not None:
-            captured.append(dom)
+    if not captured and dom is not None:
+        captured.append(dom)
     if not captured:
         raise CandidateShapeChanged("candidate_shape_changed")
     return captured
@@ -460,6 +485,7 @@ class BrowserCandidateSource:
                     page_number,
                     active.open,
                     active.wait_for_response_processing,
+                    active.raise_if_response_failed,
                 ):
                     yield CandidatePage(page_number, source_page, payload)
 
