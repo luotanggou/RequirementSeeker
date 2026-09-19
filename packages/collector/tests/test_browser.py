@@ -290,6 +290,40 @@ def test_repeated_navigation_does_not_duplicate_consumers():
         fake.page.remove_listener.assert_called_once_with("response", first_callback)
 
 
+def test_observe_rebinds_response_consumer_without_navigation():
+    fake = fake_playwright()
+    first_consumer = Mock()
+    second_consumer = Mock()
+    response = Mock(url="https://example.test/comments")
+    response.json.return_value = {"comments": []}
+    adapter = Mock()
+    adapter.response_kind.return_value = "comments"
+
+    with BrowserSession(fake.factory) as session:
+        session.open("https://example.test/video", adapter, first_consumer)
+        first_callback = fake.page.on.call_args.args[1]
+        session.observe(adapter, second_consumer)
+        second_callback = fake.page.on.call_args.args[1]
+        second_callback(response)
+
+    fake.page.goto.assert_called_once_with("https://example.test/video")
+    fake.page.remove_listener.assert_called_once_with("response", first_callback)
+    first_consumer.assert_not_called()
+    second_consumer.assert_called_once_with(response.url, {"comments": []})
+
+
+def test_observe_listener_failure_has_safe_processing_category():
+    fake = fake_playwright()
+    fake.page.on.side_effect = RuntimeError("secret-marker")
+
+    with pytest.raises(BrowserSessionError) as caught:
+        with BrowserSession(fake.factory) as session:
+            session.observe(Mock(), Mock())
+
+    assert_safe_exception(caught.value, BrowserSessionError, "response_processing_failed")
+    fake.page.goto.assert_not_called()
+
+
 def test_open_outside_active_session_preserves_not_open_category():
     session = BrowserSession(Mock())
     with pytest.raises(BrowserSessionError) as caught:

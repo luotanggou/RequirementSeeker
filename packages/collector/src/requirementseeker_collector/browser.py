@@ -225,12 +225,13 @@ class BrowserSession:
             if self._cleanup_failed:
                 raise BrowserSessionError("browser_cleanup_failed")
 
-    def open(
+    def observe(
         self,
-        url: str,
         adapter: PlatformAdapter,
         consume: Callable[[str, object], None],
     ) -> None:
+        """Replace response observers without navigating the active page."""
+
         def response_kind(url: str) -> ResponseKind | None:
             try:
                 return adapter.response_kind(url)
@@ -267,7 +268,6 @@ class BrowserSession:
         context = self._context
         if context is None:
             raise BrowserSessionError("browser_not_open")
-        navigated = False
         shape_changed = False
         response_failed = False
         try:
@@ -288,6 +288,30 @@ class BrowserSession:
             self._response_callback = on_response
             self._request_finished_callback = finish_request
             self._request_failed_callback = finish_request
+        except ResponseShapeChanged:
+            shape_changed = True
+        except BrowserSessionError:
+            response_failed = True
+        except Exception:
+            response_failed = True
+        if shape_changed:
+            raise ResponseShapeChanged("response_shape_changed")
+        if response_failed:
+            raise BrowserSessionError("response_processing_failed")
+        self.raise_if_response_failed()
+
+    def open(
+        self,
+        url: str,
+        adapter: PlatformAdapter,
+        consume: Callable[[str, object], None],
+    ) -> None:
+        page = self.page
+        self.observe(adapter, consume)
+        navigated = False
+        shape_changed = False
+        response_failed = False
+        try:
             page.goto(url)
             navigated = True
         except ResponseShapeChanged:

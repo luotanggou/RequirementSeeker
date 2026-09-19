@@ -1267,7 +1267,14 @@ def test_douyin_query_paging_keeps_audited_urls_after_canonical_navigation(
         def open(self, url: str, adapter: Any, consume: Any) -> None:
             self.opened_urls.append(url)
             self.page.url = "https://www.douyin.com/search/efficiency%20tools?type=general"
-            page_number = len(self.opened_urls)
+            consume(
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&count=10&offset=10",
+                douyin_payload(("7390000000000000001", "current", 1)),
+            )
+
+        def observe(self, adapter: Any, consume: Any) -> None:
+            page_number = adapter.page_number
             if page_number == 2:
                 late_url = (
                     "https://www.douyin.com/aweme/v1/web/general/search/single/"
@@ -1289,6 +1296,7 @@ def test_douyin_query_paging_keeps_audited_urls_after_canonical_navigation(
             )
 
     session = SequencedSession(page)
+    page.mouse = Mock()  # type: ignore[attr-defined]
     source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
 
     result = discover(
@@ -1298,10 +1306,88 @@ def test_douyin_query_paging_keeps_audited_urls_after_canonical_navigation(
     )
 
     assert session.opened_urls == [
+        "https://www.douyin.com/search/efficiency%20tools?type=general&page=1"
+    ]
+    assert [str(item.source_page) for item in result.candidates] == [
         "https://www.douyin.com/search/efficiency%20tools?type=general&page=1",
         "https://www.douyin.com/search/efficiency%20tools?type=general&page=2",
     ]
-    assert [str(item.source_page) for item in result.candidates] == session.opened_urls
+
+
+def test_douyin_query_paging_scrolls_same_page_after_rebinding_response_adapter(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    page = FakePage(final_url="about:blank")
+
+    class ScrollingMouse:
+        def __init__(self, session: "ScrollingSession") -> None:
+            self.session = session
+
+        def wheel(self, delta_x: float, delta_y: float) -> None:
+            assert (delta_x, delta_y) == (0, 10000)
+            events.append("scroll")
+            assert len(self.session.observed_pages) == 1
+            for page_number in (2, 3):
+                response_url = (
+                    "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                    f"?keyword=efficiency%20tools&count=10&offset={page_number * 10}"
+                )
+                assert self.session.adapter.response_kind(response_url) == "comments"
+                self.session.consume(
+                    response_url,
+                    douyin_payload((f"739000000000000000{page_number}", "current", page_number)),
+                )
+
+    class ScrollingSession(FakeSession):
+        def __init__(self, browser_page: FakePage) -> None:
+            super().__init__(browser_page)
+            self.opened_urls: list[str] = []
+            self.observed_pages: list[int] = []
+
+        def open(self, url: str, adapter: Any, consume: Any) -> None:
+            self.opened_urls.append(url)
+            events.append("open")
+            self.page.url = "https://www.douyin.com/search/efficiency%20tools?type=general"
+            self.adapter = adapter
+            self.consume = consume
+            current_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&count=10&offset=10"
+            )
+            consume(current_url, douyin_payload(("7390000000000000001", "current", 1)))
+
+        def observe(self, adapter: Any, consume: Any) -> None:
+            events.append("observe")
+            self.adapter = adapter
+            self.consume = consume
+            self.observed_pages.append(adapter.page_number)
+
+    session = ScrollingSession(page)
+    page.mouse = ScrollingMouse(session)  # type: ignore[attr-defined]
+    source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
+
+    result = discover(
+        request(platform="douyin", max_pages=3),
+        browser=source,
+        output_root=tmp_path,
+    )
+
+    assert session.opened_urls == [
+        "https://www.douyin.com/search/efficiency%20tools?type=general&page=1"
+    ]
+    assert session.observed_pages == [2]
+    assert events == ["open", "observe", "scroll"]
+    assert [item.video_key for item in result.candidates] == [
+        "7390000000000000001",
+        "7390000000000000002",
+        "7390000000000000003",
+    ]
+    assert [str(item.source_page) for item in result.candidates] == [
+        "https://www.douyin.com/search/efficiency%20tools?type=general&page=1",
+        "https://www.douyin.com/search/efficiency%20tools?type=general&page=2",
+        "https://www.douyin.com/search/efficiency%20tools?type=general&page=3",
+    ]
 
 
 def test_douyin_future_batch_is_awaited_without_polluting_current_page(
@@ -1339,6 +1425,10 @@ def test_douyin_future_batch_is_awaited_without_polluting_current_page(
             else:
                 assert self.future_settled is True
 
+        def observe(self, adapter: Any, consume: Any) -> None:
+            del adapter, consume
+            pytest.fail("a validated prefetched batch must not be requested again")
+
         def wait_for_response_processing(self, **kwargs: float) -> None:
             super().wait_for_response_processing(**kwargs)
             if self.future is not None:
@@ -1352,6 +1442,8 @@ def test_douyin_future_batch_is_awaited_without_polluting_current_page(
                 self.future_settled = True
 
     session = PrefetchSession(page)
+
+    page.mouse = Mock()  # type: ignore[attr-defined]
     source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
 
     result = discover(
@@ -1363,8 +1455,9 @@ def test_douyin_future_batch_is_awaited_without_polluting_current_page(
     assert session.future_settled is True
     assert [item.video_key for item in result.candidates] == [
         "7390000000000000001",
-        "7390000000000000002",
+        "7390000000000000098",
     ]
+    page.mouse.wheel.assert_not_called()  # type: ignore[attr-defined]
 
 
 def test_real_browser_session_awaits_inflight_douyin_prefetch_before_next_page(
@@ -1609,22 +1702,34 @@ def test_douyin_third_page_without_offset_thirty_fails_closed(tmp_path: Path) ->
 
         def open(self, url: str, adapter: Any, consume: Any) -> None:
             del url
-            self.open_count += 1
             self.page.url = "https://www.douyin.com/search/efficiency%20tools?type=general"
+            self.adapter = adapter
+            self.consume = consume
+            self.emit_batch()
+
+        def observe(self, adapter: Any, consume: Any) -> None:
+            self.adapter = adapter
+            self.consume = consume
+
+        def emit_batch(self) -> None:
+            self.open_count += 1
             observed_offset = min(self.open_count, 2) * 10
             response_url = (
                 "https://www.douyin.com/aweme/v1/web/general/search/single/"
                 f"?keyword=efficiency%20tools&count=10&offset={observed_offset}"
             )
-            if adapter.response_kind(response_url) is not None:
-                consume(
+            if self.adapter.response_kind(response_url) is not None:
+                self.consume(
                     response_url,
                     douyin_payload((f"739000000000000000{self.open_count}", "current", 1)),
                 )
 
+    session = MissingThirdBatchSession(page)
+    page.mouse = Mock()  # type: ignore[attr-defined]
+    page.mouse.wheel.side_effect = lambda *_: session.emit_batch()  # type: ignore[attr-defined]
     source = BrowserCandidateSource(
         BrowserLaunchConfig(),
-        session=MissingThirdBatchSession(page),  # type: ignore[arg-type]
+        session=session,  # type: ignore[arg-type]
     )
 
     with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):

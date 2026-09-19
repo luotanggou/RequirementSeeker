@@ -419,6 +419,7 @@ def _capture_candidate_payloads(
     open_page: Callable[[str, PlatformAdapter, Callable[[str, object], None]], None],
     wait_for_response_processing: Callable[..., None],
     raise_if_response_failed: Callable[[], None],
+    cached_douyin_batches: dict[tuple[int, int], CandidatePayload] | None = None,
 ) -> list[CandidatePayload]:
     captured: list[CandidatePayload] = []
     candidate_shape_changed = False
@@ -427,6 +428,11 @@ def _capture_candidate_payloads(
         _expected_query(request, source_page),
         page_number,
     )
+    if cached_douyin_batches is not None:
+        for batch in tuple(cached_douyin_batches):
+            offset, count = batch
+            if offset == page_number * count:
+                captured.append(cached_douyin_batches.pop(batch))
 
     def consume(response_url: str, payload: object) -> None:
         nonlocal candidate_shape_changed
@@ -446,6 +452,13 @@ def _capture_candidate_payloads(
                 raise ResponseShapeChanged("response_shape_changed") from None
         if matcher.matches_current_page(response_url):
             captured.append(payload)
+        elif cached_douyin_batches is not None and matcher.response_kind(response_url) is not None:
+            batch = matcher._douyin_batch(response_url)
+            assert batch is not None
+            offset, count = batch
+            future_page = offset // count
+            if page_number < future_page <= request.max_pages:
+                cached_douyin_batches.setdefault(batch, payload)
 
     def preserve_candidate_shape(operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         try:
@@ -462,7 +475,8 @@ def _capture_candidate_payloads(
         request.platform == "bilibili" and request.query is not None and page_number == 1
     )
     allow_douyin_implicit_page = request.platform == "douyin" and request.query is not None
-    preserve_candidate_shape(open_page, source_page, cast(PlatformAdapter, matcher), consume)
+    if not captured:
+        preserve_candidate_shape(open_page, source_page, cast(PlatformAdapter, matcher), consume)
     _validate_navigated_url(
         request.platform,
         source_page,
@@ -535,16 +549,36 @@ class BrowserCandidateSource:
         manager = cast(AbstractContextManager[BrowserSession], session)
         with manager as active:
             page = active.page
+            cached_douyin_batches: dict[tuple[int, int], CandidatePayload] | None = (
+                {} if request.platform == "douyin" and request.query is not None else None
+            )
             for page_number in range(1, request.max_pages + 1):
                 source_page = _search_url(request, page_number)
+                open_page = active.open
+                if request.platform == "douyin" and request.query is not None and page_number > 1:
+
+                    def advance_page(
+                        url: str,
+                        adapter: PlatformAdapter,
+                        consume: Callable[[str, object], None],
+                    ) -> None:
+                        del url
+                        active.observe(adapter, consume)
+                        try:
+                            page.mouse.wheel(0, 10000)
+                        except Exception:
+                            raise BrowserSessionError("browser_navigation_failed") from None
+
+                    open_page = advance_page
                 for payload in _capture_candidate_payloads(
                     page,
                     request,
                     source_page,
                     page_number,
-                    active.open,
+                    open_page,
                     active.wait_for_response_processing,
                     active.raise_if_response_failed,
+                    cached_douyin_batches,
                 ):
                     yield CandidatePage(page_number, source_page, payload)
 
