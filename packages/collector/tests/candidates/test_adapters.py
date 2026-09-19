@@ -11,6 +11,7 @@ from requirementseeker_collector.candidates.adapters import (
     CandidateShapeChanged,
     parse_bilibili_candidates,
     parse_douyin_candidates,
+    reject_comment_payload,
 )
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
@@ -29,6 +30,23 @@ class UnreadableCommentPayload(Mapping[str, object]):
 
     def __len__(self) -> int:
         return 1
+
+
+class MappingWithUnreadableValue(Mapping[str, object]):
+    def __init__(self, values: dict[str, object], unreadable_key: str) -> None:
+        self._values = values
+        self._unreadable_key = unreadable_key
+
+    def __getitem__(self, key: str) -> object:
+        if key == self._unreadable_key:
+            raise AssertionError(f"forbidden value was read through key {key!r}")
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
 
 
 def load_fixture(name: str) -> dict[str, Any]:
@@ -125,6 +143,38 @@ def test_douyin_candidates_skip_known_related_word_card_and_preserve_source_posi
         ("7390000000000000001", 1),
         ("7390000000000000002", 3),
     ]
+
+
+def test_douyin_candidate_allows_direct_aweme_preview_comment_list_without_reading_it() -> None:
+    payload = load_fixture("douyin/candidates.json")
+    detail = payload["data"][0]["aweme_info"]
+    detail["comment_list"] = object()
+    payload["data"][0]["aweme_info"] = MappingWithUnreadableValue(
+        detail,
+        "comment_list",
+    )
+    payload["data"].insert(1, _douyin_related_word_card())
+
+    items = parse_douyin_candidates(
+        payload,
+        "AI工具推荐",
+        DOUYIN_SOURCE,
+        NOW,
+        direction="software_tools",
+    )
+
+    assert [(item.video_key, item.source_rank) for item in items] == [
+        ("7390000000000000001", 1),
+        ("7390000000000000002", 3),
+    ]
+    assert all("comment_list" not in item.model_dump() for item in items)
+
+
+def test_public_comment_rejection_stays_generic_for_direct_aweme_preview_position() -> None:
+    payload = MappingWithUnreadableValue({"comment_list": object()}, "comment_list")
+
+    with pytest.raises(CandidateContainsComments, match="^candidate_payload_contains_comments$"):
+        reject_comment_payload({"data": [{"aweme_info": payload}]})
 
 
 def test_douyin_related_word_card_with_comment_key_is_rejected_without_reading_value() -> None:
@@ -227,23 +277,95 @@ def test_douyin_empty_or_all_related_word_page_keeps_empty_parser_result(
     assert items == []
 
 
-@pytest.mark.parametrize("parser", [parse_bilibili_candidates, parse_douyin_candidates])
 @pytest.mark.parametrize(
     "forbidden_key",
     ["comments", "replies", "comment_list", "reply_list", "COMMENTS"],
 )
-def test_candidate_payload_rejects_comment_keys_at_any_depth(
-    parser: Any, forbidden_key: str
+def test_bilibili_candidate_payload_rejects_comment_keys_at_any_depth(
+    forbidden_key: str,
 ) -> None:
-    payload = load_fixture(
-        "bilibili/candidates.json"
-        if parser is parse_bilibili_candidates
-        else "douyin/candidates.json"
-    )
+    payload = load_fixture("bilibili/candidates.json")
     payload["outer"] = [{"nested": {forbidden_key: [{"text": "must not be read"}]}}]
 
     with pytest.raises(CandidateContainsComments, match="^candidate_payload_contains_comments$"):
-        parser(payload, "query", SOURCE, NOW, direction="software_tools")
+        parse_bilibili_candidates(payload, "query", SOURCE, NOW, direction="software_tools")
+
+
+def _place_douyin_forbidden_mapping(
+    payload: Mapping[str, Any],
+    location: str,
+    forbidden_key: str,
+) -> Mapping[str, Any]:
+    forbidden = MappingWithUnreadableValue({forbidden_key: object()}, forbidden_key)
+    if location == "root":
+        values = dict(payload)
+        values[forbidden_key] = object()
+        return MappingWithUnreadableValue(values, forbidden_key)
+
+    data = payload["data"]
+    if location == "data_item":
+        data.insert(0, forbidden)
+    elif location == "related_word":
+        values = _douyin_related_word_card()
+        values[forbidden_key] = object()
+        data.insert(0, MappingWithUnreadableValue(values, forbidden_key))
+    elif location == "aweme_info":
+        detail = data[0]["aweme_info"]
+        detail[forbidden_key] = object()
+        data[0]["aweme_info"] = MappingWithUnreadableValue(detail, forbidden_key)
+    elif location == "aweme_info_nested":
+        data[0]["aweme_info"]["author"] = forbidden
+    elif location == "statistics":
+        statistics = data[0]["aweme_info"]["statistics"]
+        statistics[forbidden_key] = object()
+        data[0]["aweme_info"]["statistics"] = MappingWithUnreadableValue(
+            statistics,
+            forbidden_key,
+        )
+    elif location == "other_branch":
+        payload["other"] = forbidden
+    else:
+        raise AssertionError(f"unknown test location: {location}")
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("location", "forbidden_key"),
+    [
+        (location, forbidden_key)
+        for location in (
+            "root",
+            "data_item",
+            "related_word",
+            "aweme_info_nested",
+            "statistics",
+            "other_branch",
+        )
+        for forbidden_key in ("comments", "replies", "comment_list", "reply_list")
+    ]
+    + [
+        ("aweme_info", forbidden_key)
+        for forbidden_key in ("comments", "replies", "reply_list", "COMMENT_LIST")
+    ],
+)
+def test_douyin_candidate_rejects_comment_keys_outside_exact_preview_position_without_reading_value(
+    location: str,
+    forbidden_key: str,
+) -> None:
+    payload = _place_douyin_forbidden_mapping(
+        load_fixture("douyin/candidates.json"),
+        location,
+        forbidden_key,
+    )
+
+    with pytest.raises(CandidateContainsComments, match="^candidate_payload_contains_comments$"):
+        parse_douyin_candidates(
+            payload,
+            "query",
+            DOUYIN_SOURCE,
+            NOW,
+            direction="software_tools",
+        )
 
 
 @pytest.mark.parametrize("parser", [parse_bilibili_candidates, parse_douyin_candidates])

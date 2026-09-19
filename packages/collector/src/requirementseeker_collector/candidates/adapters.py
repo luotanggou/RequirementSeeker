@@ -32,6 +32,34 @@ def reject_comment_payload(value: object) -> None:
             reject_comment_payload(child)
 
 
+def _is_douyin_preview_comment_list(path: tuple[str | int, ...], key: object) -> bool:
+    return (
+        key == "comment_list"
+        and len(path) == 3
+        and path[0] == "data"
+        and type(path[1]) is int
+        and path[2] == "aweme_info"
+    )
+
+
+def _reject_douyin_comment_payload(
+    value: object,
+    path: tuple[str | int, ...] = (),
+) -> None:
+    """Reject comments except the unread direct video-preview field."""
+    if isinstance(value, Mapping):
+        for key in value:
+            normalized_key = str(key).lower()
+            if normalized_key in FORBIDDEN_CANDIDATE_KEYS:
+                if _is_douyin_preview_comment_list(path, key):
+                    continue
+                raise CandidateContainsComments("candidate_payload_contains_comments")
+            _reject_douyin_comment_payload(value[key], (*path, str(key)))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_douyin_comment_payload(child, (*path, index))
+
+
 def _mapping(value: object) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise CandidateShapeChanged("candidate_shape_changed")
@@ -125,7 +153,7 @@ def parse_douyin_candidates(
     direction: Direction,
 ) -> list[CandidateVideo]:
     """Parse the supported Douyin search result array in page order."""
-    reject_comment_payload(payload)
+    _reject_douyin_comment_payload(payload)
     try:
         if type(payload.get("status_code")) is not int or payload.get("status_code") != 0:
             raise CandidateShapeChanged("candidate_shape_changed")
