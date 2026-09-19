@@ -728,6 +728,99 @@ def test_discovery_counts_navigation_pages_when_one_page_has_multiple_payloads(
     assert result.pages_processed == 2
 
 
+def test_discovery_rejects_empty_douyin_api_result_before_publishing(tmp_path: Path) -> None:
+    browser = FakeBrowser(
+        [
+            CandidatePage(
+                page_number=1,
+                source_page=(
+                    "https://www.douyin.com/search/efficiency%20tools?type=general&page=1"
+                ),
+                payload=douyin_payload(),
+            )
+        ]
+    )
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        discover(
+            request(platform="douyin", max_pages=1),
+            browser=browser,
+            output_root=tmp_path,
+        )
+
+    assert not (tmp_path / "candidates").exists()
+    assert list(tmp_path.rglob("manifest.json")) == []
+    assert list(tmp_path.rglob("discovery.json")) == []
+
+
+def test_discovery_rejects_all_related_word_results_before_publishing(tmp_path: Path) -> None:
+    payload = douyin_payload()
+    payload["data"] = [
+        {
+            "type": 6,
+            "doc_type": 108,
+            "card_type": 6,
+            "card_unique_name": "related_word",
+        }
+    ]
+    browser = FakeBrowser(
+        [
+            CandidatePage(
+                page_number=1,
+                source_page=(
+                    "https://www.douyin.com/search/efficiency%20tools?type=general&page=1"
+                ),
+                payload=payload,
+            )
+        ]
+    )
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        discover(
+            request(platform="douyin", max_pages=1),
+            browser=browser,
+            output_root=tmp_path,
+        )
+
+    assert not (tmp_path / "candidates").exists()
+    assert list(tmp_path.rglob("manifest.json")) == []
+    assert list(tmp_path.rglob("discovery.json")) == []
+
+
+def test_discovery_allows_empty_intermediate_result_when_later_page_has_video(
+    tmp_path: Path,
+) -> None:
+    browser = FakeBrowser(
+        [
+            CandidatePage(
+                page_number=1,
+                source_page=(
+                    "https://www.douyin.com/search/efficiency%20tools?type=general&page=1"
+                ),
+                payload=douyin_payload(),
+            ),
+            CandidatePage(
+                page_number=2,
+                source_page=(
+                    "https://www.douyin.com/search/efficiency%20tools?type=general&page=2"
+                ),
+                payload=douyin_payload(("7390000000000000001", "one", 1)),
+            ),
+        ]
+    )
+
+    result = discover(
+        request(platform="douyin", max_pages=2),
+        browser=browser,
+        output_root=tmp_path,
+    )
+
+    assert [item.video_key for item in result.candidates] == ["7390000000000000001"]
+    assert result.pages_processed == 2
+    assert result.manifest_path.is_file()
+    assert result.discovery_path.is_file()
+
+
 def test_discovery_writes_auditable_manifest_but_never_calls_batch(tmp_path: Path) -> None:
     batch = Mock()
 

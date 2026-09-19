@@ -715,6 +715,9 @@ def discover(
         if len(candidates) == request.max_results:
             break
 
+    if not candidates:
+        raise CandidateShapeChanged("candidate_shape_changed")
+
     manifest = CandidateManifest(candidates=candidates)
     audit = DiscoveryAudit(
         platform=request.platform,

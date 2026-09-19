@@ -63,6 +63,20 @@ def _optional_count(value: object) -> int | None:
     return value if type(value) is int and value >= 0 else None
 
 
+def _is_douyin_related_word_card(item: Mapping[str, Any]) -> bool:
+    return (
+        "aweme_info" not in item
+        and type(item.get("type")) is int
+        and item.get("type") == 6
+        and type(item.get("doc_type")) is int
+        and item.get("doc_type") == 108
+        and type(item.get("card_type")) is int
+        and item.get("card_type") == 6
+        and type(item.get("card_unique_name")) is str
+        and item.get("card_unique_name") == "related_word"
+    )
+
+
 def parse_bilibili_candidates(
     payload: Mapping[str, Any],
     query: str | None,
@@ -118,7 +132,10 @@ def parse_douyin_candidates(
         result = _sequence(payload.get("data"))
         candidates: list[CandidateVideo] = []
         for rank, value in enumerate(result, start=1):
-            detail = _mapping(_mapping(value).get("aweme_info"))
+            item = _mapping(value)
+            if _is_douyin_related_word_card(item):
+                continue
+            detail = _mapping(item.get("aweme_info"))
             statistics_value = detail.get("statistics")
             statistics = {} if statistics_value is None else _mapping(statistics_value)
             video_key = _identifier(detail.get("aweme_id"))

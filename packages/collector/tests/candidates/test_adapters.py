@@ -100,6 +100,133 @@ def test_douyin_candidates_map_metadata_in_page_order_without_comment_text() -> 
     )
 
 
+def _douyin_related_word_card() -> dict[str, object]:
+    return {
+        "type": 6,
+        "doc_type": 108,
+        "card_type": 6,
+        "card_unique_name": "related_word",
+    }
+
+
+def test_douyin_candidates_skip_known_related_word_card_and_preserve_source_positions() -> None:
+    payload = load_fixture("douyin/candidates.json")
+    payload["data"].insert(1, _douyin_related_word_card())
+
+    items = parse_douyin_candidates(
+        payload,
+        "AI工具推荐",
+        DOUYIN_SOURCE,
+        NOW,
+        direction="software_tools",
+    )
+
+    assert [(item.video_key, item.source_rank) for item in items] == [
+        ("7390000000000000001", 1),
+        ("7390000000000000002", 3),
+    ]
+
+
+def test_douyin_related_word_card_with_comment_key_is_rejected_without_reading_value() -> None:
+    payload = load_fixture("douyin/candidates.json")
+    card = _douyin_related_word_card()
+    card["comments"] = UnreadableCommentPayload()
+    payload["data"].insert(1, card)
+
+    with pytest.raises(CandidateContainsComments, match="^candidate_payload_contains_comments$"):
+        parse_douyin_candidates(
+            payload,
+            "AI工具推荐",
+            DOUYIN_SOURCE,
+            NOW,
+            direction="software_tools",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("type", 7),
+        ("type", "6"),
+        ("doc_type", 109),
+        ("doc_type", "108"),
+        ("card_type", 7),
+        ("card_type", "6"),
+        ("card_unique_name", "unknown"),
+        ("card_unique_name", 6),
+    ],
+)
+def test_douyin_candidate_unknown_non_video_card_closes(field: str, value: object) -> None:
+    payload = load_fixture("douyin/candidates.json")
+    card = _douyin_related_word_card()
+    card[field] = value
+    payload["data"].insert(1, card)
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        parse_douyin_candidates(
+            payload,
+            "AI工具推荐",
+            DOUYIN_SOURCE,
+            NOW,
+            direction="software_tools",
+        )
+
+
+@pytest.mark.parametrize("field", ["type", "doc_type", "card_type", "card_unique_name"])
+def test_douyin_candidate_incomplete_related_word_marker_closes(field: str) -> None:
+    payload = load_fixture("douyin/candidates.json")
+    card = _douyin_related_word_card()
+    del card[field]
+    payload["data"].insert(1, card)
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        parse_douyin_candidates(
+            payload,
+            "AI工具推荐",
+            DOUYIN_SOURCE,
+            NOW,
+            direction="software_tools",
+        )
+
+
+@pytest.mark.parametrize(
+    "card",
+    [
+        {"unknown": "mapping"},
+        {**_douyin_related_word_card(), "aweme_info": None},
+    ],
+)
+def test_douyin_candidate_other_missing_aweme_info_shapes_close(
+    card: dict[str, object],
+) -> None:
+    payload = load_fixture("douyin/candidates.json")
+    payload["data"].insert(1, card)
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        parse_douyin_candidates(
+            payload,
+            "AI工具推荐",
+            DOUYIN_SOURCE,
+            NOW,
+            direction="software_tools",
+        )
+
+
+@pytest.mark.parametrize("cards", [[], [_douyin_related_word_card()]])
+def test_douyin_empty_or_all_related_word_page_keeps_empty_parser_result(
+    cards: list[dict[str, object]],
+) -> None:
+    items = parse_douyin_candidates(
+        {"status_code": 0, "data": cards},
+        "AI工具推荐",
+        DOUYIN_SOURCE,
+        NOW,
+        direction="software_tools",
+    )
+
+    assert items == []
+
+
 @pytest.mark.parametrize("parser", [parse_bilibili_candidates, parse_douyin_candidates])
 @pytest.mark.parametrize(
     "forbidden_key",
