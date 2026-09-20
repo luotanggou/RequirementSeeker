@@ -93,6 +93,36 @@ def test_douyin_rejects_non_scalar_required_comment_fields(field: str, value: ob
         DouyinAdapter().parse_comment_response(payload, "top", 1, video_author_id="author")
 
 
+@pytest.mark.parametrize("empty_text", ["", " \t\r\n"])
+def test_douyin_skips_comments_without_analyzable_text(empty_text: str) -> None:
+    payload = load_fixture("douyin/comments.json")
+    comments = payload["comments"]
+    assert isinstance(comments, list)
+    first = comments[0]
+    assert isinstance(first, dict)
+    first["text"] = empty_text
+
+    page = DouyinAdapter().parse_comment_response(payload, "top", 1, video_author_id="author")
+
+    assert [comment.raw_comment_id for comment in page.comments] == ["22"]
+
+
+@pytest.mark.parametrize(("field", "value"), [("cid", []), ("user", [])])
+def test_douyin_empty_text_does_not_hide_other_invalid_required_fields(
+    field: str, value: object
+) -> None:
+    payload = load_fixture("douyin/comments.json")
+    comments = payload["comments"]
+    assert isinstance(comments, list)
+    first = comments[0]
+    assert isinstance(first, dict)
+    first["text"] = ""
+    first[field] = value
+
+    with pytest.raises(ResponseShapeChanged):
+        DouyinAdapter().parse_comment_response(payload, "top", 1, video_author_id="author")
+
+
 def test_douyin_oversized_comment_timestamp_is_unavailable() -> None:
     payload = load_fixture("douyin/comments.json")
     comments = payload["comments"]

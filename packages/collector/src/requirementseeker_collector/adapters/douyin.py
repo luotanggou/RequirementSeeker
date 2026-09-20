@@ -103,10 +103,17 @@ class DouyinAdapter:
         try:
             if payload.get("status_code") != 0:
                 raise ResponseShapeChanged("response_shape_changed")
-            comments = [
-                _comment(mapping(value), stratum, rank, video_author_id, parent_comment_id)
-                for value in sequence(payload.get("comments"))
-            ]
+            comments = []
+            for value in sequence(payload.get("comments")):
+                comment = mapping(value)
+                text = comment.get("text")
+                if isinstance(text, str) and not text.strip():
+                    required_identifier(comment.get("cid"))
+                    mapping(comment.get("user"))
+                    continue
+                comments.append(
+                    _comment(comment, stratum, rank, video_author_id, parent_comment_id)
+                )
             has_more_value = payload.get("has_more")
             if type(has_more_value) is not int or has_more_value not in {0, 1}:
                 raise ResponseShapeChanged("response_shape_changed")
