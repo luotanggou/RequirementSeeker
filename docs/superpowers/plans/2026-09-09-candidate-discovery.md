@@ -343,6 +343,6 @@ Expected: exit 0 only with exact 24, 12/12 platform, 6/6/4/4/4 direction and 8/8
 
 Show sources, ranks, reported comment counts, planned scale buckets and all unavailable fields.
 
-- [ ] **Step 5: Ask for explicit approval before batch**
+- [x] **Step 5: Ask for explicit approval before batch**
 
 Do not execute `rs-collect batch` until the user approves the displayed manifest.
