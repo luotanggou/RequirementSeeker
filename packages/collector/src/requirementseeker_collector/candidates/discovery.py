@@ -36,7 +36,12 @@ from ..browser import (
 )
 from ..contracts import Contract, Direction, Platform, PublicHttpUrl
 from ..runner import _paths_are_safe_under
-from .adapters import CandidateShapeChanged, parse_bilibili_candidates, parse_douyin_candidates
+from .adapters import (
+    CandidateShapeChanged,
+    parse_bilibili_candidates,
+    parse_bilibili_reported_comment_count,
+    parse_douyin_candidates,
+)
 from .contracts import CandidateVideo
 
 type CandidatePayload = Mapping[str, Any]
@@ -51,6 +56,7 @@ _CANDIDATE_RESPONSE_PATHS: dict[Platform, tuple[str, ...]] = {
 }
 _PUBLIC_URL_ADAPTER = TypeAdapter(PublicHttpUrl)
 _BILIBILI_VIDEO_PATH = re.compile(r"^/video/(BV[0-9A-Za-z]{10})/?$")
+_BILIBILI_BVID = re.compile(r"^BV[0-9A-Za-z]{10}$")
 
 
 def _is_candidate_page(platform: Platform, url: str) -> bool:
@@ -132,6 +138,30 @@ class CandidatePageSource(Protocol):
     def pages(self, request: DiscoveryRequest) -> Iterable[CandidatePage]: ...
 
 
+class _MetadataSession(Protocol):
+    def __enter__(self) -> Self: ...
+
+    def __exit__(self, *args: object) -> None: ...
+
+    def open(
+        self,
+        url: str,
+        adapter: PlatformAdapter,
+        consume: Callable[[str, object], None],
+    ) -> None: ...
+
+    def wait_for_response_processing(
+        self, *, quiet_seconds: float, timeout_seconds: float
+    ) -> None: ...
+
+    def raise_if_response_failed(self) -> None: ...
+
+
+type _MetadataSessionFactory = Callable[
+    [BrowserLaunchConfig], AbstractContextManager[_MetadataSession]
+]
+
+
 class CandidateManifest(Contract):
     manifest_version: Literal["1.0"] = "1.0"
     candidates: list[CandidateVideo]
@@ -170,6 +200,92 @@ def deduplicate_candidates(items: Iterable[CandidateVideo]) -> list[CandidateVid
             seen.add(key)
             result.append(item)
     return result
+
+
+@dataclass(frozen=True)
+class _BilibiliMetadataResponseAdapter:
+    expected_bvid: str
+
+    def __post_init__(self) -> None:
+        if _BILIBILI_BVID.fullmatch(self.expected_bvid) is None:
+            raise CandidateShapeChanged("candidate_shape_changed")
+
+    def response_kind(self, url: str) -> ResponseKind | None:
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return None
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc != "api.bilibili.com"
+            or parsed.path != "/x/web-interface/view"
+            or parsed.fragment
+            or parse_qsl(parsed.query, keep_blank_values=True) != [("bvid", self.expected_bvid)]
+        ):
+            return None
+        return "video"
+
+
+def _create_bilibili_metadata_session(
+    launch_config: BrowserLaunchConfig,
+) -> AbstractContextManager[_MetadataSession]:
+    return cast(
+        AbstractContextManager[_MetadataSession],
+        BrowserSession(launch_config=launch_config),
+    )
+
+
+def _fetch_bilibili_reported_comment_count(session: _MetadataSession, video_key: str) -> int | None:
+    adapter = _BilibiliMetadataResponseAdapter(video_key)
+    url = f"https://api.bilibili.com/x/web-interface/view?bvid={video_key}"
+    captured = False
+    count: int | None = None
+
+    def consume(response_url: str, payload: object) -> None:
+        nonlocal captured, count
+        if adapter.response_kind(response_url) is None or not isinstance(payload, Mapping):
+            raise ResponseShapeChanged("response_shape_changed")
+        try:
+            count = parse_bilibili_reported_comment_count(payload, video_key)
+        except CandidateShapeChanged:
+            raise ResponseShapeChanged("response_shape_changed") from None
+        captured = True
+
+    try:
+        session.open(url, cast(PlatformAdapter, adapter), consume)
+        session.wait_for_response_processing(quiet_seconds=0.25, timeout_seconds=5.0)
+        session.raise_if_response_failed()
+    except ResponseShapeChanged:
+        raise CandidateShapeChanged("candidate_shape_changed") from None
+    except BrowserSessionError:
+        return None
+    return count if captured else None
+
+
+def _enrich_bilibili_reported_comment_counts(
+    candidates: list[CandidateVideo],
+    launch_config: BrowserLaunchConfig,
+    session_factory: _MetadataSessionFactory,
+) -> list[CandidateVideo]:
+    missing = [
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate.platform == "bilibili" and candidate.reported_comment_count is None
+    ]
+    if not missing:
+        return candidates
+    enriched = list(candidates)
+    try:
+        with session_factory(launch_config) as session:
+            for index in missing:
+                candidate = enriched[index]
+                count = _fetch_bilibili_reported_comment_count(session, candidate.video_key)
+                enriched[index] = candidate.model_copy(update={"reported_comment_count": count})
+    except ResponseShapeChanged:
+        raise CandidateShapeChanged("candidate_shape_changed") from None
+    except BrowserSessionError:
+        return candidates
+    return enriched
 
 
 def _search_url(request: DiscoveryRequest, page_number: int) -> str:
@@ -742,6 +858,7 @@ def discover(
     *,
     launch_config: BrowserLaunchConfig | None = None,
     browser_session: BrowserSession | None = None,
+    metadata_session_factory: _MetadataSessionFactory | None = None,
 ) -> DiscoveryResult:
     """Discover candidates and publish review-only artifacts after complete validation."""
 
@@ -782,6 +899,12 @@ def discover(
 
     if not candidates:
         raise CandidateShapeChanged("candidate_shape_changed")
+
+    candidates = _enrich_bilibili_reported_comment_counts(
+        candidates,
+        config,
+        metadata_session_factory or _create_bilibili_metadata_session,
+    )
 
     manifest = CandidateManifest(candidates=candidates)
     audit = DiscoveryAudit(

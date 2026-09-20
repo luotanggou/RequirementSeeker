@@ -21,12 +21,22 @@ from requirementseeker_collector.candidates.discovery import (
     BrowserCandidateSource,
     CandidatePage,
     DiscoveryRequest,
+    _BilibiliMetadataResponseAdapter,
     _CandidateResponseAdapter,
     _capture_candidate_payloads,
     _dom_payload,
     _search_url,
     discover,
 )
+
+
+@pytest.fixture(autouse=True)
+def avoid_real_bilibili_metadata_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        discovery_module,
+        "_create_bilibili_metadata_session",
+        lambda launch_config: UnavailableMetadataSession(),
+    )
 
 
 def request(**overrides: Any) -> DiscoveryRequest:
@@ -89,6 +99,55 @@ class FakeBrowser:
     def pages(self, discovery_request: DiscoveryRequest) -> Iterable[CandidatePage]:
         del discovery_request
         yield from self.supplied_pages
+
+
+class UnavailableMetadataSession:
+    def __enter__(self) -> "UnavailableMetadataSession":
+        raise BrowserSessionError("browser_start_failed")
+
+    def __exit__(self, *args: object) -> None:
+        del args
+
+
+class FakeMetadataSession:
+    def __init__(
+        self,
+        payloads: Mapping[str, object],
+        *,
+        open_error: BrowserSessionError | None = None,
+    ) -> None:
+        self.payloads = payloads
+        self.open_error = open_error
+        self.urls: list[str] = []
+        self.adapters: list[Any] = []
+        self.waits: list[dict[str, float]] = []
+        self.entered = 0
+        self.exited = 0
+
+    def __enter__(self) -> "FakeMetadataSession":
+        self.entered += 1
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        del args
+        self.exited += 1
+
+    def open(self, url: str, adapter: Any, consume: Any) -> None:
+        self.urls.append(url)
+        self.adapters.append(adapter)
+        if self.open_error is not None:
+            raise self.open_error
+        assert adapter.response_kind(url) == "video"
+        video_key = url.rpartition("=")[2]
+        payload = self.payloads.get(video_key)
+        if payload is not None:
+            consume(url, payload)
+
+    def wait_for_response_processing(self, **kwargs: float) -> None:
+        self.waits.append(kwargs)
+
+    def raise_if_response_failed(self) -> None:
+        return None
 
 
 class FakeLocator:
@@ -691,6 +750,241 @@ def test_discovery_stops_at_page_and_result_caps(tmp_path: Path) -> None:
         "BV2-1",
     ]
     assert result.pages_processed == 2
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://api.bilibili.com/x/web-interface/view?bvid=BV1xx411c7mD",
+        "https://www.bilibili.com/x/web-interface/view?bvid=BV1xx411c7mD",
+        "https://evil.api.bilibili.com/x/web-interface/view?bvid=BV1xx411c7mD",
+        "https://api.bilibili.com/x/web-interface/view/?bvid=BV1xx411c7mD",
+        "https://api.bilibili.com/x/web-interface/view?bvid=BV1Q541167Qg",
+        "https://api.bilibili.com/x/web-interface/view?bvid=BV1xx411c7mD&bvid=BV1xx411c7mD",
+        "https://api.bilibili.com/x/web-interface/view?bvid=BV1xx411c7mD&extra=1",
+        "https://api.bilibili.com/x/v2/reply/main?bvid=BV1xx411c7mD",
+    ],
+)
+def test_bilibili_metadata_adapter_rejects_every_nonexact_response(url: str) -> None:
+    adapter = _BilibiliMetadataResponseAdapter("BV1xx411c7mD")
+
+    assert adapter.response_kind(url) is None
+
+
+def test_bilibili_metadata_adapter_matches_only_exact_video_metadata() -> None:
+    adapter = _BilibiliMetadataResponseAdapter("BV1xx411c7mD")
+
+    assert (
+        adapter.response_kind("https://api.bilibili.com/x/web-interface/view?bvid=BV1xx411c7mD")
+        == "video"
+    )
+
+
+def test_discovery_enriches_only_missing_bilibili_counts_after_dedup_and_cap(
+    tmp_path: Path,
+) -> None:
+    source_page = "https://search.bilibili.com/video?keyword=efficiency%20tools&page=1"
+    browser = FakeBrowser(
+        [
+            CandidatePage(
+                1,
+                source_page,
+                {
+                    "code": 0,
+                    "data": {
+                        "result": [
+                            {"bvid": "BV1xx411c7mD", "title": "one", "review": None},
+                            {"bvid": "BV1xx411c7mD", "title": "duplicate", "review": None},
+                            {"bvid": "BV1Q541167Qg", "title": "two", "review": 7},
+                            {"bvid": "BV1ab411c7mE", "title": "three", "review": None},
+                            {"bvid": "BV1vZRHBsEcj", "title": "outside", "review": None},
+                        ]
+                    },
+                },
+            )
+        ],
+        browser="chrome",
+        session_mode="dedicated",
+    )
+    session = FakeMetadataSession(
+        {
+            "BV1xx411c7mD": {
+                "code": 0,
+                "data": {"bvid": "BV1xx411c7mD", "stat": {"reply": 11}},
+            },
+            "BV1ab411c7mE": {
+                "code": 0,
+                "data": {"bvid": "BV1ab411c7mE", "stat": {"reply": 33}},
+            },
+        }
+    )
+    configs: list[BrowserLaunchConfig] = []
+    launch_config = BrowserLaunchConfig(
+        browser="chrome",
+        output_root=tmp_path,
+        platform="bilibili",
+    )
+
+    def factory(config: BrowserLaunchConfig) -> FakeMetadataSession:
+        configs.append(config)
+        return session
+
+    result = discover(
+        request(max_pages=1, max_results=3),
+        browser=browser,
+        output_root=tmp_path,
+        launch_config=launch_config,
+        metadata_session_factory=factory,
+    )
+
+    assert configs == [launch_config]
+    assert session.entered == session.exited == 1
+    assert session.urls == [
+        "https://api.bilibili.com/x/web-interface/view?bvid=BV1xx411c7mD",
+        "https://api.bilibili.com/x/web-interface/view?bvid=BV1ab411c7mE",
+    ]
+    assert session.waits == [
+        {"quiet_seconds": 0.25, "timeout_seconds": 5.0},
+        {"quiet_seconds": 0.25, "timeout_seconds": 5.0},
+    ]
+    assert session.adapters[0] is not session.adapters[1]
+    assert session.adapters[0].response_kind(session.urls[1]) is None
+    assert [item.reported_comment_count for item in result.candidates] == [11, 7, 33]
+
+
+def test_discovery_never_enriches_douyin_candidates(
+    tmp_path: Path,
+) -> None:
+    def factory(config: BrowserLaunchConfig) -> FakeMetadataSession:
+        raise AssertionError(f"unexpected Bilibili session for {config}")
+
+    browser = FakeBrowser(
+        [
+            CandidatePage(
+                1,
+                "https://www.douyin.com/search/efficiency%20tools?type=general&page=1",
+                douyin_payload(("7390000000000000001", "one", 5)),
+            )
+        ]
+    )
+
+    result = discover(
+        request(platform="douyin", max_pages=1),
+        browser=browser,
+        output_root=tmp_path,
+        metadata_session_factory=factory,
+    )
+
+    assert result.candidates[0].reported_comment_count == 5
+
+
+def test_discovery_does_not_start_metadata_session_for_existing_bilibili_count(
+    tmp_path: Path,
+) -> None:
+    def factory(config: BrowserLaunchConfig) -> FakeMetadataSession:
+        raise AssertionError(f"unexpected metadata session for {config}")
+
+    result = discover(
+        request(max_pages=1),
+        browser=FakeBrowser([page(1, ("BV1xx411c7mD", "one", 5))]),
+        output_root=tmp_path,
+        metadata_session_factory=factory,
+    )
+
+    assert result.candidates[0].reported_comment_count == 5
+
+
+@pytest.mark.parametrize("payloads", [{}, {"BV1xx411c7mD": {"code": -404}}])
+def test_bilibili_metadata_unavailable_keeps_none(
+    tmp_path: Path,
+    payloads: Mapping[str, object],
+) -> None:
+    session = FakeMetadataSession(payloads)
+    browser = FakeBrowser(
+        [
+            CandidatePage(
+                1,
+                "https://search.bilibili.com/video?keyword=efficiency%20tools&page=1",
+                {
+                    "code": 0,
+                    "data": {"result": [{"bvid": "BV1xx411c7mD", "title": "one", "review": None}]},
+                },
+            )
+        ]
+    )
+
+    result = discover(
+        request(max_pages=1),
+        browser=browser,
+        output_root=tmp_path,
+        metadata_session_factory=lambda config: session,
+    )
+
+    assert result.candidates[0].reported_comment_count is None
+
+
+def test_bilibili_metadata_browser_failure_keeps_none_without_retry(
+    tmp_path: Path,
+) -> None:
+    session = FakeMetadataSession({}, open_error=BrowserSessionError("browser_navigation_failed"))
+    browser = FakeBrowser(
+        [
+            CandidatePage(
+                1,
+                "https://search.bilibili.com/video?keyword=efficiency%20tools&page=1",
+                {
+                    "code": 0,
+                    "data": {"result": [{"bvid": "BV1xx411c7mD", "title": "one", "review": None}]},
+                },
+            )
+        ]
+    )
+
+    result = discover(
+        request(max_pages=1),
+        browser=browser,
+        output_root=tmp_path,
+        metadata_session_factory=lambda config: session,
+    )
+
+    assert result.candidates[0].reported_comment_count is None
+    assert len(session.urls) == 1
+
+
+def test_bilibili_count_shape_failure_is_atomic(
+    tmp_path: Path,
+) -> None:
+    browser = FakeBrowser(
+        [
+            CandidatePage(
+                1,
+                "https://search.bilibili.com/video?keyword=efficiency%20tools&page=1",
+                {
+                    "code": 0,
+                    "data": {"result": [{"bvid": "BV1xx411c7mD", "title": "one", "review": None}]},
+                },
+            )
+        ]
+    )
+
+    session = FakeMetadataSession(
+        {
+            "BV1xx411c7mD": {
+                "code": 0,
+                "data": {"bvid": "BV1Q541167Qg", "stat": {"reply": 1}},
+            }
+        }
+    )
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        discover(
+            request(max_pages=1),
+            browser=browser,
+            output_root=tmp_path,
+            metadata_session_factory=lambda config: session,
+        )
+
+    assert not (tmp_path / "candidates").exists()
 
 
 def test_discovery_does_not_pull_a_page_beyond_the_page_cap(tmp_path: Path) -> None:

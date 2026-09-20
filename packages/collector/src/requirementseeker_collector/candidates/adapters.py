@@ -1,5 +1,6 @@
 """Strict parsers for candidate-only Bilibili and Douyin listings."""
 
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
@@ -10,6 +11,7 @@ from ..contracts import Direction
 from .contracts import CandidateVideo
 
 FORBIDDEN_CANDIDATE_KEYS = frozenset({"comments", "replies", "comment_list", "reply_list"})
+_BILIBILI_BVID = re.compile(r"^BV[0-9A-Za-z]{10}$")
 
 
 class CandidateShapeChanged(ValueError):
@@ -89,6 +91,30 @@ def _title(value: object) -> str:
 
 def _optional_count(value: object) -> int | None:
     return value if type(value) is int and value >= 0 else None
+
+
+def parse_bilibili_reported_comment_count(
+    payload: Mapping[str, Any], expected_bvid: str
+) -> int | None:
+    """Parse one public Bilibili video metadata response without comment content."""
+    reject_comment_payload(payload)
+    try:
+        if _BILIBILI_BVID.fullmatch(expected_bvid) is None:
+            raise CandidateShapeChanged("candidate_shape_changed")
+        code = payload.get("code")
+        if type(code) is not int:
+            raise CandidateShapeChanged("candidate_shape_changed")
+        if code != 0:
+            return None
+        data = _mapping(payload.get("data"))
+        if type(data.get("bvid")) is not str or data.get("bvid") != expected_bvid:
+            raise CandidateShapeChanged("candidate_shape_changed")
+        reply = _mapping(data.get("stat")).get("reply")
+        if type(reply) is not int or reply < 0:
+            raise CandidateShapeChanged("candidate_shape_changed")
+        return reply
+    except (CandidateShapeChanged, TypeError, ValueError):
+        raise CandidateShapeChanged("candidate_shape_changed") from None
 
 
 def _is_douyin_related_word_card(item: Mapping[str, Any]) -> bool:
@@ -220,6 +246,7 @@ def parse_douyin_candidates(
 __all__ = [
     "CandidateContainsComments",
     "CandidateShapeChanged",
+    "parse_bilibili_reported_comment_count",
     "parse_bilibili_candidates",
     "parse_douyin_candidates",
     "reject_comment_payload",

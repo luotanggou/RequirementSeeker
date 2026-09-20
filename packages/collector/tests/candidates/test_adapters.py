@@ -10,6 +10,7 @@ from requirementseeker_collector.candidates.adapters import (
     CandidateContainsComments,
     CandidateShapeChanged,
     parse_bilibili_candidates,
+    parse_bilibili_reported_comment_count,
     parse_douyin_candidates,
     reject_comment_payload,
 )
@@ -19,6 +20,71 @@ SOURCE = "https://search.bilibili.com/all?keyword=tool"
 DOUYIN_SOURCE = "https://www.douyin.com/search/tool"
 NOW = datetime(2026, 9, 13, 1, tzinfo=UTC)
 MISSING = object()
+
+
+@pytest.mark.parametrize("count", [0, 123])
+def test_bilibili_reported_comment_count_parses_exact_video(count: int) -> None:
+    assert (
+        parse_bilibili_reported_comment_count(
+            {
+                "code": 0,
+                "data": {
+                    "bvid": "BV1xx411c7mD",
+                    "stat": {"reply": count},
+                },
+            },
+            "BV1xx411c7mD",
+        )
+        == count
+    )
+
+
+def test_bilibili_reported_comment_count_nonzero_business_code_is_unavailable() -> None:
+    assert (
+        parse_bilibili_reported_comment_count(
+            {"code": -404, "data": object()},
+            "BV1xx411c7mD",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"code": True, "data": {}},
+        {"code": "0", "data": {}},
+        {"code": 0, "data": None},
+        {"code": 0, "data": {"bvid": 1, "stat": {"reply": 1}}},
+        {"code": 0, "data": {"bvid": "BV1Q541167Qg", "stat": {"reply": 1}}},
+        {"code": 0, "data": {"bvid": "BV1xx411c7mD", "stat": None}},
+        {"code": 0, "data": {"bvid": "BV1xx411c7mD", "stat": {}}},
+        {"code": 0, "data": {"bvid": "BV1xx411c7mD", "stat": {"reply": -1}}},
+        {"code": 0, "data": {"bvid": "BV1xx411c7mD", "stat": {"reply": True}}},
+        {"code": 0, "data": {"bvid": "BV1xx411c7mD", "stat": {"reply": "1"}}},
+    ],
+)
+def test_bilibili_reported_comment_count_rejects_invalid_success_shape(
+    payload: Mapping[str, object],
+) -> None:
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        parse_bilibili_reported_comment_count(payload, "BV1xx411c7mD")
+
+
+@pytest.mark.parametrize("expected_bvid", ["BV1xx411c7m", "av123", "BV1xx411c7m!"])
+def test_bilibili_reported_comment_count_rejects_invalid_expected_bvid(
+    expected_bvid: str,
+) -> None:
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        parse_bilibili_reported_comment_count({}, expected_bvid)
+
+
+def test_bilibili_reported_comment_count_rejects_comment_bomb_without_reading_it() -> None:
+    with pytest.raises(CandidateContainsComments, match="^candidate_payload_contains_comments$"):
+        parse_bilibili_reported_comment_count(
+            UnreadableCommentPayload(),
+            "BV1xx411c7mD",
+        )
 
 
 class UnreadableCommentPayload(Mapping[str, object]):
