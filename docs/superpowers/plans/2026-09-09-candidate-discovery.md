@@ -323,23 +323,23 @@ git commit -m "feat(collector): expose candidate discovery and coverage CLI"
 - Local only: `.local-data/m2-real/candidates/`
 - Local only: `docs/execution/2026-09-09.md`
 
-- [ ] **Step 1: Collect candidates from user-confirmed public queries or source pages**
+- [x] **Step 1: Collect candidates from user-confirmed public queries or source pages**
 
 Run one headed `discover` command per confirmed platform/direction source. Record exact commands and outcomes in the local execution log; keep screenshots and discovery reports under `.local-data/`.
 
 The user-confirmed queries are `AI工具推荐`, `AI教程工作流`, `AI生活助手`, `AI娱乐创作`, and `AI电商营销`, mapped in order to the five required directions. Use the dedicated Chrome profile for each platform during real discovery.
 
-- [ ] **Step 2: Assemble a 24-video manifest from discovered candidates**
+- [x] **Step 2: Assemble a 24-video manifest from discovered candidates**
 
 Use only explicit candidate IDs/URLs and preserve discovery provenance. Do not infer a missing platform by copying another platform's entries.
 
-- [ ] **Step 3: Validate the manifest**
+- [x] **Step 3: Validate the manifest**
 
 Run: `uv run --project packages/collector rs-collect validate-plan .local-data/m2-real/candidates/approved-manifest.json`
 
 Expected: exit 0 only with exact 24, 12/12 platform, 6/6/4/4/4 direction and 8/8/8 scale coverage. Otherwise keep the precise gap report.
 
-- [ ] **Step 4: Open manifest and discovery report in visible VS Code**
+- [x] **Step 4: Open manifest and discovery report in visible VS Code**
 
 Show sources, ranks, reported comment counts, planned scale buckets and all unavailable fields.
 
