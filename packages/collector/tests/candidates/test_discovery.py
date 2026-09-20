@@ -1937,6 +1937,98 @@ def test_douyin_waits_for_first_candidate_response_then_collects_quiet_window(
     assert session.wait_calls == 1
 
 
+def test_douyin_first_page_scrolls_once_after_initial_wait_and_collects_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    elapsed = 0.0
+
+    def monotonic() -> float:
+        return elapsed
+
+    page = FakePage(final_url="https://www.douyin.com/search/efficiency%20tools?type=general")
+
+    class RecoveryMouse:
+        def __init__(self, session: FakeSession) -> None:
+            self.session = session
+            self.calls: list[tuple[float, float]] = []
+
+        def wheel(self, delta_x: float, delta_y: float) -> None:
+            self.calls.append((delta_x, delta_y))
+            response_url = (
+                "https://www.douyin.com/aweme/v1/web/general/search/single/"
+                "?keyword=efficiency%20tools&offset=10&count=10"
+            )
+            assert self.session.adapter.response_kind(response_url) == "comments"
+            self.session.consume(
+                response_url,
+                douyin_payload(("7390000000000000001", "after scroll", 1)),
+            )
+
+    def wait_for_timeout(timeout: float) -> None:
+        nonlocal elapsed
+        elapsed += timeout / 1000
+
+    page.wait_for_timeout = wait_for_timeout  # type: ignore[method-assign]
+    monkeypatch.setattr(discovery_module, "monotonic", monotonic, raising=False)
+    session = FakeSession(page)
+    mouse = RecoveryMouse(session)
+    page.mouse = mouse  # type: ignore[attr-defined]
+    source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
+
+    result = discover(
+        request(platform="douyin", max_pages=1),
+        browser=source,
+        output_root=tmp_path,
+    )
+
+    assert [item.video_key for item in result.candidates] == ["7390000000000000001"]
+    assert elapsed == pytest.approx(5.0)
+    assert mouse.calls == [(0, 10000)]
+    assert session.bounded_wait_called is True
+
+
+def test_douyin_first_page_scroll_can_reveal_trusted_dom(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    elapsed = 0.0
+
+    def monotonic() -> float:
+        return elapsed
+
+    page = FakePage(final_url="https://www.douyin.com/search/efficiency%20tools?type=general")
+
+    def wait_for_timeout(timeout: float) -> None:
+        nonlocal elapsed
+        elapsed += timeout / 1000
+
+    def reveal_dom(delta_x: float, delta_y: float) -> None:
+        assert (delta_x, delta_y) == (0, 10000)
+        page.dom_rows = [
+            {
+                "data-video-key": "7390000000000000001",
+                "data-title": "trusted candidate",
+            }
+        ]
+
+    page.wait_for_timeout = wait_for_timeout  # type: ignore[method-assign]
+    page.mouse = Mock()  # type: ignore[attr-defined]
+    page.mouse.wheel.side_effect = reveal_dom  # type: ignore[attr-defined]
+    monkeypatch.setattr(discovery_module, "monotonic", monotonic, raising=False)
+    session = FakeSession(page)
+    source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
+
+    result = discover(
+        request(platform="douyin", max_pages=1),
+        browser=source,
+        output_root=tmp_path,
+    )
+
+    assert [item.video_key for item in result.candidates] == ["7390000000000000001"]
+    assert elapsed == pytest.approx(5.0)
+    page.mouse.wheel.assert_called_once_with(0, 10000)  # type: ignore[attr-defined]
+    assert session.bounded_wait_called is False
+
+
 def test_candidate_first_response_wait_is_bounded_and_publishes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1952,6 +2044,7 @@ def test_candidate_first_response_wait_is_bounded_and_publishes_nothing(
         elapsed += timeout / 1000
 
     page.wait_for_timeout = wait_for_timeout  # type: ignore[method-assign]
+    page.mouse = Mock()  # type: ignore[attr-defined]
     monkeypatch.setattr(discovery_module, "monotonic", monotonic, raising=False)
     session = FakeSession(page)
     source = BrowserCandidateSource(BrowserLaunchConfig(), session=session)  # type: ignore[arg-type]
@@ -1963,7 +2056,8 @@ def test_candidate_first_response_wait_is_bounded_and_publishes_nothing(
             output_root=tmp_path,
         )
 
-    assert elapsed == pytest.approx(5.0)
+    assert elapsed == pytest.approx(10.0)
+    page.mouse.wheel.assert_called_once_with(0, 10000)  # type: ignore[attr-defined]
     assert session.bounded_wait_called is False
     assert not (tmp_path / "candidates").exists()
 

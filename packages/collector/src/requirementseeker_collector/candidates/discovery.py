@@ -509,6 +509,37 @@ def _capture_candidate_payloads(
         if not captured:
             dom = _dom_payload(page, request.platform)
 
+    if (
+        not captured
+        and dom is None
+        and request.platform == "douyin"
+        and request.query is not None
+        and page_number == 1
+    ):
+        try:
+            page.mouse.wheel(0, 10000)
+        except Exception:
+            raise BrowserSessionError("browser_navigation_failed") from None
+        dom = _dom_payload(page, request.platform)
+        deadline = monotonic() + 5.0
+        for _ in range(100):
+            if captured or dom is not None:
+                break
+            remaining_seconds = deadline - monotonic()
+            if remaining_seconds <= 0:
+                break
+            remaining_ms = min(50.0, remaining_seconds * 1000)
+            preserve_candidate_shape(page.wait_for_timeout, remaining_ms)
+            preserve_candidate_shape(raise_if_response_failed)
+            _validate_navigated_url(
+                request.platform,
+                source_page,
+                page.url,
+                allow_douyin_implicit_page=allow_douyin_implicit_page,
+            )
+            if not captured:
+                dom = _dom_payload(page, request.platform)
+
     if captured:
         preserve_candidate_shape(
             wait_for_response_processing, quiet_seconds=0.75, timeout_seconds=2.0
