@@ -105,6 +105,34 @@ def _is_douyin_related_word_card(item: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_douyin_common_aladdin_card(item: Mapping[str, Any]) -> bool:
+    return (
+        "aweme_info" not in item
+        and type(item.get("type")) is int
+        and item.get("type") == 77
+        and type(item.get("doc_type")) is int
+        and item.get("doc_type") == 305
+        and type(item.get("card_type")) is int
+        and item.get("card_type") == 0
+        and type(item.get("card_unique_name")) is str
+        and item.get("card_unique_name") == "toutiao_article"
+        and isinstance(item.get("common_aladdin"), Mapping)
+    )
+
+
+def _is_douyin_unusable_aweme(detail: Mapping[str, Any]) -> bool:
+    video_key = detail.get("aweme_id")
+    return (
+        "desc" in detail
+        and "statistics" in detail
+        and type(video_key) is str
+        and bool(video_key)
+        and not any(character.isspace() for character in video_key)
+        and detail.get("desc") is None
+        and detail.get("statistics") is None
+    )
+
+
 def parse_bilibili_candidates(
     payload: Mapping[str, Any],
     query: str | None,
@@ -161,11 +189,12 @@ def parse_douyin_candidates(
         candidates: list[CandidateVideo] = []
         for rank, value in enumerate(result, start=1):
             item = _mapping(value)
-            if _is_douyin_related_word_card(item):
+            if _is_douyin_related_word_card(item) or _is_douyin_common_aladdin_card(item):
                 continue
             detail = _mapping(item.get("aweme_info"))
-            statistics_value = detail.get("statistics")
-            statistics = {} if statistics_value is None else _mapping(statistics_value)
+            if _is_douyin_unusable_aweme(detail):
+                continue
+            statistics = _mapping(detail.get("statistics"))
             video_key = _identifier(detail.get("aweme_id"))
             candidates.append(
                 CandidateVideo.model_validate(

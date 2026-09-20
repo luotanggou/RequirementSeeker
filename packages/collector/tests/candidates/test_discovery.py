@@ -753,7 +753,9 @@ def test_discovery_rejects_empty_douyin_api_result_before_publishing(tmp_path: P
     assert list(tmp_path.rglob("discovery.json")) == []
 
 
-def test_discovery_rejects_all_related_word_results_before_publishing(tmp_path: Path) -> None:
+def test_discovery_rejects_all_recognized_skipped_results_before_publishing(
+    tmp_path: Path,
+) -> None:
     payload = douyin_payload()
     payload["data"] = [
         {
@@ -761,7 +763,21 @@ def test_discovery_rejects_all_related_word_results_before_publishing(tmp_path: 
             "doc_type": 108,
             "card_type": 6,
             "card_unique_name": "related_word",
-        }
+        },
+        {
+            "type": 77,
+            "doc_type": 305,
+            "card_type": 0,
+            "card_unique_name": "toutiao_article",
+            "common_aladdin": {},
+        },
+        {
+            "aweme_info": {
+                "aweme_id": "7390000000000000099",
+                "desc": None,
+                "statistics": None,
+            }
+        },
     ]
     browser = FakeBrowser(
         [

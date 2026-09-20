@@ -127,6 +127,27 @@ def _douyin_related_word_card() -> dict[str, object]:
     }
 
 
+def _douyin_common_aladdin_card() -> dict[str, object]:
+    return {
+        "type": 77,
+        "doc_type": 305,
+        "card_type": 0,
+        "card_unique_name": "toutiao_article",
+        "common_aladdin": {},
+    }
+
+
+def _douyin_unusable_aweme() -> dict[str, object]:
+    return {
+        "aweme_info": {
+            "aweme_id": "7390000000000000099",
+            "desc": None,
+            "statistics": None,
+            "comment_list": object(),
+        }
+    }
+
+
 def test_douyin_candidates_skip_known_related_word_card_and_preserve_source_positions() -> None:
     payload = load_fixture("douyin/candidates.json")
     payload["data"].insert(1, _douyin_related_word_card())
@@ -143,6 +164,97 @@ def test_douyin_candidates_skip_known_related_word_card_and_preserve_source_posi
         ("7390000000000000001", 1),
         ("7390000000000000002", 3),
     ]
+
+
+def test_douyin_candidates_skip_exact_common_aladdin_and_unusable_aweme_positions() -> None:
+    payload = load_fixture("douyin/candidates.json")
+    unusable = _douyin_unusable_aweme()
+    detail = unusable["aweme_info"]
+    assert isinstance(detail, dict)
+    unusable["aweme_info"] = MappingWithUnreadableValue(detail, "comment_list")
+    payload["data"][1:1] = [_douyin_common_aladdin_card(), unusable]
+
+    items = parse_douyin_candidates(
+        payload,
+        "AI工具推荐",
+        DOUYIN_SOURCE,
+        NOW,
+        direction="software_tools",
+    )
+
+    assert [(item.video_key, item.source_rank) for item in items] == [
+        ("7390000000000000001", 1),
+        ("7390000000000000002", 4),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("type", 76),
+        ("doc_type", 304),
+        ("card_type", 1),
+        ("card_unique_name", "related_word"),
+        ("common_aladdin", None),
+    ],
+)
+def test_douyin_common_aladdin_near_miss_closes(field: str, value: object) -> None:
+    payload = load_fixture("douyin/candidates.json")
+    card = _douyin_common_aladdin_card()
+    card[field] = value
+    payload["data"].insert(1, card)
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        parse_douyin_candidates(
+            payload,
+            "AI工具推荐",
+            DOUYIN_SOURCE,
+            NOW,
+            direction="software_tools",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("desc", "partially usable"),
+        ("statistics", {}),
+        ("aweme_id", ""),
+        ("aweme_id", 7390000000000000099),
+    ],
+)
+def test_douyin_unusable_aweme_near_miss_closes(field: str, value: object) -> None:
+    payload = load_fixture("douyin/candidates.json")
+    item = _douyin_unusable_aweme()
+    detail = item["aweme_info"]
+    assert isinstance(detail, dict)
+    detail[field] = value
+    payload["data"].insert(1, item)
+
+    with pytest.raises(CandidateShapeChanged, match="^candidate_shape_changed$"):
+        parse_douyin_candidates(
+            payload,
+            "AI工具推荐",
+            DOUYIN_SOURCE,
+            NOW,
+            direction="software_tools",
+        )
+
+
+def test_douyin_common_aladdin_comment_bomb_is_rejected_without_reading_value() -> None:
+    payload = load_fixture("douyin/candidates.json")
+    card = _douyin_common_aladdin_card()
+    card["common_aladdin"] = MappingWithUnreadableValue({"comments": object()}, "comments")
+    payload["data"].insert(1, card)
+
+    with pytest.raises(CandidateContainsComments, match="^candidate_payload_contains_comments$"):
+        parse_douyin_candidates(
+            payload,
+            "AI工具推荐",
+            DOUYIN_SOURCE,
+            NOW,
+            direction="software_tools",
+        )
 
 
 def test_douyin_candidate_allows_direct_aweme_preview_comment_list_without_reading_it() -> None:
@@ -262,8 +374,15 @@ def test_douyin_candidate_other_missing_aweme_info_shapes_close(
         )
 
 
-@pytest.mark.parametrize("cards", [[], [_douyin_related_word_card()]])
-def test_douyin_empty_or_all_related_word_page_keeps_empty_parser_result(
+@pytest.mark.parametrize(
+    "cards",
+    [
+        [],
+        [_douyin_related_word_card()],
+        [_douyin_common_aladdin_card(), _douyin_unusable_aweme()],
+    ],
+)
+def test_douyin_empty_or_all_recognized_non_video_page_keeps_empty_parser_result(
     cards: list[dict[str, object]],
 ) -> None:
     items = parse_douyin_candidates(
