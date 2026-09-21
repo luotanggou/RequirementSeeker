@@ -354,7 +354,7 @@ git commit -m "feat(dataset): redact direct identifiers deterministically"
 - Create: `packages/dataset-tools/tests/test_sanitize.py`
 - Create: `packages/dataset-tools/tests/test_split.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_sanitize_writes_no_raw_ids_or_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -371,7 +371,7 @@ def test_sanitize_emits_m2_sampling_manifest(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setenv("RS_DATASET_TEST_SECRET", "local-test-secret-at-least-32-bytes")
     result = sanitize_root(RAW_FIXTURE, PLAN_FIXTURE, tmp_path, "RS_DATASET_TEST_SECRET")
     manifest = SamplingManifest.model_validate_json(result.sampling_manifests[0].read_text("utf-8"))
-    assert manifest.direction == "software_tools"
+    assert manifest.direction == "software_tool"
     assert manifest.video_id.startswith("video_")
     assert all(item.startswith("comment_") for values in manifest.stratum_comment_ids.values() for item in values)
 
@@ -382,13 +382,13 @@ def test_24_videos_split_10_7_7_and_keep_replies_together() -> None:
     assert len(set(split.development + split.calibration + split.holdout)) == 24
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_sanitize.py packages/dataset-tools/tests/test_split.py -q`
 
 Expected: sanitize and split imports fail.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Read exactly the raw video bundles named by the approved collection plan, pseudonymize video/author/comment/parent IDs, sanitize title/description/comment text, preserve nullable metrics and collection metadata, and write the equivalent directory plus `sanitization.json` and `sampling-manifest.json`. Do not process other directories found beside approved inputs; report only their count. Hash canonical input/output JSON with SHA-256; reports contain only pseudonymous IDs, counts, rule version, hashes and review reasons. Derive the target from the approved collection formula, author counts from sanitized comments, normalized duplicates as the sum of all repeated normalized-text occurrences beyond the first, exact duplicates from `exact_duplicate_merged` collection errors, and stratum IDs from each comment's accepted source. Set SamplingManifest `collected_total` to unique comment count plus exact duplicate occurrences, matching M2's pre-ID-dedup meaning. Translate `software_tools -> software_tool` and `life_services -> life_service`; reject unknown mappings.
 
@@ -404,13 +404,13 @@ def stable_split(video_ids: Sequence[str]) -> DatasetSplit:
 
 Use sibling staging and backup directories with the same restore behavior as the collector, implemented independently. Reject an approved video whose raw directory is missing or has a mismatched platform/video key. A video with zero comments or zero successful pages writes a sanitization exclusion report, emits no SamplingManifest, and is added to the replacement-candidate report. Never modify raw files.
 
-- [ ] **Step 4: Run pipeline tests and checks**
+- [x] **Step 4: Run pipeline tests and checks**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_sanitize.py packages/dataset-tools/tests/test_split.py -q && uv run --project packages/dataset-tools ruff check packages/dataset-tools && uv run --project packages/dataset-tools mypy --config-file packages/dataset-tools/pyproject.toml packages/dataset-tools/src`
 
 Expected: raw IDs/secrets are absent and stable split passes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/dataset-tools/src/requirementseeker_dataset/sanitize.py packages/dataset-tools/src/requirementseeker_dataset/split.py packages/dataset-tools/tests/test_sanitize.py packages/dataset-tools/tests/test_split.py
