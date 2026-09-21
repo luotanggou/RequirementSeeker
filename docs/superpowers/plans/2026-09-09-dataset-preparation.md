@@ -45,7 +45,7 @@
 - Create: `packages/dataset-tools/src/requirementseeker_dataset/contracts.py`
 - Create: `packages/dataset-tools/tests/test_contracts.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_sanitization_report_rejects_raw_identifiers() -> None:
@@ -62,13 +62,13 @@ def test_label_template_uses_explicit_unlabeled_values() -> None:
     assert item.normalized_need is None
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_contracts.py -q`
 
 Expected: package import fails.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create an independent Hatchling project with only Pydantic runtime dependency. Define strict `SanitizedVideo`, `SanitizedComment`, `SamplingManifest`, `SanitizationReport`, `ReviewItem`, `DatasetSplit`, `CommentLabel`, `ClusterLabel`, `AnnotationFile`, and `AdjudicationFile`. Reuse field names from raw output, but their ID values must match `^(video|author|comment)_[0-9a-f]{32}$`. `SamplingManifest` mirrors the approved M2 1.0 file fields without importing Agent code.
 
@@ -116,13 +116,13 @@ class SamplingManifest(Contract):
 
 Copy M2's cross-field invariants into this file-contract model and test them: successful pages cannot exceed requested pages; distinct known authors and duplicate counts cannot exceed their totals; candidate IDs and per-stratum IDs are unique; strata keys equal `available_strata`; every stratum ID belongs to the candidate pool.
 
-- [ ] **Step 4: Run tests and quality checks**
+- [x] **Step 4: Run tests and quality checks**
 
 Run: `uv sync --project packages/dataset-tools && uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_contracts.py -q && uv run --project packages/dataset-tools ruff check packages/dataset-tools && uv run --project packages/dataset-tools mypy packages/dataset-tools/src`
 
 Expected: contract tests pass; package has no dependency on collector or Agent.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/dataset-tools
