@@ -794,3 +794,9 @@ Run pagination unit/integration tests, the complete collector and agent suites, 
 - [x] **Step 5: Re-run both accepted pilots with dedicated Chrome profiles**
 
 Let the user log into each platform-specific Chrome profile once, close and reopen it to prove reuse, then collect the same accepted videos with pagination. Compare counts and stop reasons against the anonymous baselines (Bilibili 35/200, Douyin 28/200). Do not run batch until both persistent paginated samples validate.
+
+## 2026-09-21 完成状态
+
+Task 1–11、用户批准的 24 视频清单和真实批量采集均已完成。批准批次包含 24 个可用目录和 5,090 条评论；最终代码基线为 `4adbf70`。完整验收、输入边界和下一阶段门禁见 `docs/development/2026-09-21-comment-collection-acceptance.md`。
+
+采集器阶段到此结束。后续不得继续把原始数据处理、语义标注或模型评测加入本计划；这些工作转入独立的 `2026-09-09-dataset-preparation.md` 与 Agent M2 计划。

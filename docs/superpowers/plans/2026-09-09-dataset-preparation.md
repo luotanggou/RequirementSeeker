@@ -14,6 +14,14 @@
 
 开始本计划前，原始采集器必须产生至少两个通过 Schema 的本地试点目录。测试只使用人工 fixture，真实原始数据继续留在 `.local-data/`。
 
+### 2026-09-21 真实批次输入修订
+
+原始采集阶段已完成，验收记录见 `docs/development/2026-09-21-comment-collection-acceptance.md`。批准清单包含 24 个视频和 5,090 条评论；`.local-data/m2-real/raw/` 另有 2 个早期试点目录。
+
+数据工具必须以 `approved-manifest.json` 的 24 个 `(platform, video_key)` 为严格允许列表，而不是枚举并处理 `raw/` 下的全部目录。清单内目录缺失、平台或键不匹配时关闭式失败；清单外目录不进入输出，只在安全摘要中记录排除数量。测试需覆盖“24 个批准目录加 2 个试点目录仍只输出 24 个视频”，且不得在摘要中写出被排除目录的原始键。
+
+实现 Task 1–4 不需要真实秘密。首次运行真实脱敏前，操作者必须通过环境变量提供至少 32 字节的 HMAC 秘密，并保证后续重跑使用同一值；不得在命令行、日志、测试 fixture 或文档中保存秘密值。
+
 ## 文件职责图
 
 | 路径 | 职责 |
@@ -381,7 +389,7 @@ Expected: sanitize and split imports fail.
 
 - [ ] **Step 3: Write minimal implementation**
 
-Read every raw video bundle and its exact `(platform, video_key)` entry from the approved collection plan, pseudonymize video/author/comment/parent IDs, sanitize title/description/comment text, preserve nullable metrics and collection metadata, and write the equivalent directory plus `sanitization.json` and `sampling-manifest.json`. Hash canonical input/output JSON with SHA-256; reports contain only pseudonymous IDs, counts, rule version, hashes and review reasons. Derive the target from the approved collection formula, author counts from sanitized comments, normalized duplicates as the sum of all repeated normalized-text occurrences beyond the first, exact duplicates from `exact_duplicate_merged` collection errors, and stratum IDs from each comment's accepted source. Set SamplingManifest `collected_total` to unique comment count plus exact duplicate occurrences, matching M2's pre-ID-dedup meaning. Translate `software_tools -> software_tool` and `life_services -> life_service`; reject unknown mappings.
+Read exactly the raw video bundles named by the approved collection plan, pseudonymize video/author/comment/parent IDs, sanitize title/description/comment text, preserve nullable metrics and collection metadata, and write the equivalent directory plus `sanitization.json` and `sampling-manifest.json`. Do not process other directories found beside approved inputs; report only their count. Hash canonical input/output JSON with SHA-256; reports contain only pseudonymous IDs, counts, rule version, hashes and review reasons. Derive the target from the approved collection formula, author counts from sanitized comments, normalized duplicates as the sum of all repeated normalized-text occurrences beyond the first, exact duplicates from `exact_duplicate_merged` collection errors, and stratum IDs from each comment's accepted source. Set SamplingManifest `collected_total` to unique comment count plus exact duplicate occurrences, matching M2's pre-ID-dedup meaning. Translate `software_tools -> software_tool` and `life_services -> life_service`; reject unknown mappings.
 
 ```python
 def stable_split(video_ids: Sequence[str]) -> DatasetSplit:
@@ -393,7 +401,7 @@ def stable_split(video_ids: Sequence[str]) -> DatasetSplit:
     return DatasetSplit(development=ranked[:development], calibration=ranked[development:development + calibration], holdout=ranked[development + calibration:])
 ```
 
-Use sibling staging and backup directories with the same restore behavior as the collector, implemented independently. Reject a raw video missing from the approved plan or with mismatched platform/video key. A video with zero comments or zero successful pages writes a sanitization exclusion report, emits no SamplingManifest, and is added to the replacement-candidate report. Never modify raw files.
+Use sibling staging and backup directories with the same restore behavior as the collector, implemented independently. Reject an approved video whose raw directory is missing or has a mismatched platform/video key. A video with zero comments or zero successful pages writes a sanitization exclusion report, emits no SamplingManifest, and is added to the replacement-candidate report. Never modify raw files.
 
 - [ ] **Step 4: Run pipeline tests and checks**
 
@@ -528,3 +536,7 @@ Set the dataset secret only in the current process environment, run `sanitize`, 
 - [ ] **Step 7: Record the pilot result**
 
 Write counts, replacement categories, review-item counts, split assignment, failures and next action to `docs/execution/2026-09-09.md`; do not include raw IDs, raw text or the secret.
+
+- [ ] **Step 8: Run the approved 24-video batch**
+
+After both platform pilots and the complete package gate pass, run `sanitize` and `export-labels` on the exact 24-entry approved manifest. Verify 24 sanitized directories, a stable 10/7/7 split, 5,090 input comment records accounted for, no raw IDs or secret values in output, and an explicit `unlabeled` annotation template for every sanitized comment. Record only aggregate counts, review categories, safe failure codes and output hashes in the local execution log.
