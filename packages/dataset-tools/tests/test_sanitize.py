@@ -1,5 +1,8 @@
 import json
+import os
 import shutil
+import subprocess
+import sys
 from hashlib import sha256
 from pathlib import Path
 
@@ -200,3 +203,37 @@ def test_text_redaction_and_duplicate_statistics_are_safe(
     assert report.replacement_counts["email"] == 2
     assert report.review_item_count == 2
     assert {item.reason for item in report.review_items} == {"possible_precise_address"}
+
+
+def test_sampling_manifest_is_stable_across_hash_seeds(tmp_path: Path) -> None:
+    raw = _prepare_raw(tmp_path)
+    outputs = [tmp_path / "seed-one", tmp_path / "seed-two"]
+    for seed, output in zip(("1", "2"), outputs, strict=True):
+        environment = {
+            **os.environ,
+            "PYTHONHASHSEED": seed,
+            "RS_DATASET_TEST_SECRET": SECRET,
+        }
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "requirementseeker_dataset.cli",
+                "sanitize",
+                "--raw",
+                str(raw),
+                "--plan",
+                str(PLAN_FIXTURE),
+                "--output",
+                str(output),
+                "--secret-env",
+                "RS_DATASET_TEST_SECRET",
+            ],
+            check=True,
+            capture_output=True,
+            env=environment,
+            text=True,
+        )
+
+    manifests = [next(output.rglob("sampling-manifest.json")).read_bytes() for output in outputs]
+    assert manifests[0] == manifests[1]

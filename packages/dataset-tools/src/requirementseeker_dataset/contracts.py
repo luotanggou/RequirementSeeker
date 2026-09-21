@@ -12,6 +12,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictBool,
+    field_serializer,
     model_validator,
 )
 
@@ -151,6 +152,12 @@ class SamplingManifest(Contract):
     video_metrics: VideoMetrics | None
     candidate_comment_ids: list[PseudonymousCommentId]
     stratum_comment_ids: dict[SamplingStratum, list[PseudonymousCommentId]]
+
+    @field_serializer("available_strata")
+    def serialize_available_strata(self, value: set[SamplingStratum]) -> list[SamplingStratum]:
+        """集合用于校验，落盘时排序以消除进程哈希种子的影响。"""
+
+        return sorted(value)
 
     @model_validator(mode="after")
     def integrity(self) -> Self:
