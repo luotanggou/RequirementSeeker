@@ -45,6 +45,12 @@ class LabelValidationResult:
     evaluation_eligible: bool
 
 
+@dataclass(frozen=True, slots=True)
+class LabelRootValidationResult:
+    annotation_count: int
+    evaluation_eligible_count: int
+
+
 def _read_sampling_manifest(path: Path) -> SamplingManifest:
     try:
         return SamplingManifest.model_validate_json(path.read_bytes())
@@ -270,3 +276,46 @@ def validate_labels(
     if _RAW_IDENTIFIER.match(adjudication.adjudicator_id):
         raise LabelValidationError("raw_identifier_pattern")
     return LabelValidationResult(evaluation_eligible=True)
+
+
+def _read_annotation(path: Path) -> AnnotationFile:
+    try:
+        return AnnotationFile.model_validate_json(path.read_bytes())
+    except (OSError, ValidationError, ValueError):
+        raise LabelValidationError("annotation_file_invalid") from None
+
+
+def _read_adjudication(path: Path) -> AdjudicationFile:
+    try:
+        return AdjudicationFile.model_validate_json(path.read_bytes())
+    except (OSError, ValidationError, ValueError):
+        raise LabelValidationError("adjudication_file_invalid") from None
+
+
+def validate_label_root(label_root: Path) -> LabelRootValidationResult:
+    """验证目录中的主标注，以及同目录下可选的第二标注和裁决文件。"""
+
+    annotation_paths = sorted(label_root.rglob("annotation.json"))
+    if not annotation_paths:
+        raise LabelValidationError("annotation_files_missing")
+    seen_videos: set[str] = set()
+    eligible = 0
+    for path in annotation_paths:
+        annotation = _read_annotation(path)
+        if annotation.video_id in seen_videos:
+            raise LabelValidationError("duplicate_annotation_video")
+        seen_videos.add(annotation.video_id)
+        second_path = path.with_name("annotation-secondary.json")
+        adjudication_path = path.with_name("adjudication.json")
+        second = _read_annotation(second_path) if second_path.is_file() else None
+        adjudication = (
+            _read_adjudication(adjudication_path) if adjudication_path.is_file() else None
+        )
+        if not annotation.disputed and (second is not None or adjudication is not None):
+            raise LabelValidationError("unexpected_dispute_files")
+        result = validate_labels(annotation, second=second, adjudication=adjudication)
+        eligible += result.evaluation_eligible
+    return LabelRootValidationResult(
+        annotation_count=len(annotation_paths),
+        evaluation_eligible_count=eligible,
+    )
