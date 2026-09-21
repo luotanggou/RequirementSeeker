@@ -269,7 +269,7 @@ git commit -m "feat(dataset): add stable scoped pseudonymous IDs"
 - Create: `packages/dataset-tools/src/requirementseeker_dataset/text.py`
 - Create: `packages/dataset-tools/tests/test_text.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 @pytest.mark.parametrize(
@@ -296,13 +296,13 @@ def test_explicit_full_address_and_identity_number_are_replaced() -> None:
     assert result.text == "[ADDRESS]，身份证 [IDENTIFIER]"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_text.py -q`
 
 Expected: text module import fails.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Normalize Unicode to NFC, convert CRLF/CR to LF and strip only outer whitespace. Apply ordered compiled patterns for email, mainland phone, mainland identity number, explicitly introduced private handles and addresses introduced by `地址：`. Replace with `[EMAIL]`, `[PHONE]`, `[IDENTIFIER]`, `[HANDLE]`, `[ADDRESS]`; record category replacement counts. Other address-like phrases add `possible_precise_address` review without erasing the text.
 
@@ -333,13 +333,13 @@ def sanitize_text(source: str) -> TextResult:
     return TextResult(text, dict(counts), reviews)
 ```
 
-- [ ] **Step 4: Run text tests**
+- [x] **Step 4: Run text tests**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_text.py -q`
 
 Expected: replacements, preservation and conservative review tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/dataset-tools/src/requirementseeker_dataset/text.py packages/dataset-tools/tests/test_text.py
