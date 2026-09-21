@@ -193,7 +193,7 @@ git commit -m "feat(dataset): validate raw collector inputs"
 - Create: `packages/dataset-tools/src/requirementseeker_dataset/identifiers.py`
 - Create: `packages/dataset-tools/tests/test_identifiers.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_hmac_is_stable_and_type_scoped() -> None:
@@ -210,18 +210,19 @@ def test_secret_is_not_in_repr_or_error() -> None:
 
 
 def test_short_secret_is_rejected_without_value() -> None:
+    marker = b"tiny-secret-value"
     with pytest.raises(SecretConfigurationError, match="dataset_secret_too_short") as error:
-        IdentifierPseudonymizer(b"short")
-    assert "short" not in str(error.value)
+        IdentifierPseudonymizer(marker)
+    assert marker.decode() not in str(error.value)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_identifiers.py -q`
 
 Expected: identifier module import fails.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```python
 class IdentifierPseudonymizer:
@@ -249,13 +250,13 @@ class IdentifierPseudonymizer:
 
 No function returns or writes a raw-to-pseudonymous mapping. Missing environment variable errors mention only the variable name.
 
-- [ ] **Step 4: Run identifier tests**
+- [x] **Step 4: Run identifier tests**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_identifiers.py -q`
 
 Expected: stable/type-scoped/security tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/dataset-tools/src/requirementseeker_dataset/identifiers.py packages/dataset-tools/tests/test_identifiers.py
