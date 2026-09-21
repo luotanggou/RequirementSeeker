@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -1114,6 +1114,350 @@ def test_live_bilibili_collector_falls_back_to_standard_page_metadata(
     assert result.video.view_count is None
     assert [item.raw_comment_id for item in result.comments] == ["11", "12"]
     assert result.pages_requested == result.pages_succeeded == 1
+
+
+def douyin_note_script(
+    video_key: str, *, author_id: str = "note-author", marker: object = 1, status: object = 0
+) -> str:
+    detail = {
+        "awemeId": video_key,
+        "authorInfo": {"secUid": author_id, "uid": "42", "followerCount": 8},
+        "desc": "Synthetic note",
+        "createTime": 1789000000,
+        "stats": {
+            "commentCount": 2,
+            "playCount": 10,
+            "diggCount": 3,
+            "collectCount": 4,
+            "shareCount": 5,
+        },
+    }
+    component = [
+        "$",
+        "$L9",
+        None,
+        {
+            "awemeId": video_key,
+            "aweme": {"statusCode": status, "detail": detail},
+        },
+    ]
+    flight = "7:" + json.dumps(component, separators=(",", ":")) + "\n"
+    return "self.__pace_f.push(" + json.dumps([marker, flight]) + ")"
+
+
+def test_live_douyin_note_collector_falls_back_to_strict_flight_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video_key = "7208863848449756475"
+    comments_payload = json.loads(
+        (Path(__file__).parent / "fixtures/douyin/comments.json").read_text(encoding="utf-8")
+    )
+    script_text = douyin_note_script(video_key)
+
+    class ScriptLocator:
+        def text_content(self) -> str:
+            return script_text
+
+    class ScriptList:
+        def all(self) -> list[ScriptLocator]:
+            return [ScriptLocator()]
+
+    class FakePage:
+        url = f"https://www.douyin.com/note/{video_key}"
+
+        def locator(self, selector: str) -> ScriptList:
+            assert selector == "script"
+            return ScriptList()
+
+        def wait_for_timeout(self, milliseconds: float) -> None:
+            del milliseconds
+
+    class CommentOnlySession:
+        page = FakePage()
+
+        def __enter__(self) -> CommentOnlySession:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def open(self, url: str, adapter: object, consume: object) -> None:
+            del url, adapter
+            cast(Callable[[str, object], None], consume)(
+                "https://www.douyin.com/aweme/v1/web/comment/list", comments_payload
+            )
+
+        def raise_if_response_failed(self) -> None:
+            pass
+
+    monkeypatch.setattr(runner, "BrowserSession", CommentOnlySession)
+    monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        PilotRequest(
+            platform="douyin",
+            url=f"https://www.douyin.com/video/{video_key}",
+            video_key=video_key,
+        ),
+        tmp_path,
+    )
+
+    assert result.status == "success"
+    assert result.video is not None
+    assert result.video.raw_video_id == video_key
+    assert result.video.raw_author_id == "note-author"
+    assert result.video.total_comment_count == 2
+    assert result.video.like_count == 3
+    assert [comment.raw_comment_id for comment in result.comments] == ["21", "22"]
+
+
+@pytest.mark.parametrize(
+    ("marker", "status"),
+    [(True, 0), (1, False)],
+)
+def test_douyin_note_fallback_rejects_boolean_protocol_sentinels(
+    marker: object, status: object
+) -> None:
+    video_key = "7208863848449756475"
+    script_text = douyin_note_script(video_key, marker=marker, status=status)
+
+    class ScriptLocator:
+        def text_content(self) -> str:
+            return script_text
+
+    class ScriptList:
+        def all(self) -> list[ScriptLocator]:
+            return [ScriptLocator()]
+
+    class FakePage:
+        url = f"https://www.douyin.com/note/{video_key}"
+
+        def locator(self, selector: str) -> ScriptList:
+            assert selector == "script"
+            return ScriptList()
+
+    with pytest.raises(ResponseShapeChanged):
+        runner._douyin_note_video_from_page(
+            cast(Any, FakePage()),
+            PilotRequest(platform="douyin", url=f"https://www.douyin.com/video/{video_key}"),
+            runner.DouyinAdapter(),
+        )
+
+
+def test_douyin_note_fallback_rejects_redirect_to_different_note_without_explicit_key() -> None:
+    requested_key = "7208863848449756475"
+    redirected_key = "7208863848449756476"
+    script_text = douyin_note_script(redirected_key)
+
+    class ScriptLocator:
+        def text_content(self) -> str:
+            return script_text
+
+    class ScriptList:
+        def all(self) -> list[ScriptLocator]:
+            return [ScriptLocator()]
+
+    class FakePage:
+        url = f"https://www.douyin.com/note/{redirected_key}"
+
+        def locator(self, selector: str) -> ScriptList:
+            assert selector == "script"
+            return ScriptList()
+
+    with pytest.raises(ResponseShapeChanged):
+        runner._douyin_note_video_from_page(
+            cast(Any, FakePage()),
+            PilotRequest(platform="douyin", url=f"https://www.douyin.com/video/{requested_key}"),
+            runner.DouyinAdapter(),
+        )
+
+
+def test_douyin_note_fallback_waits_until_supervision_is_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video_key = "7208863848449756475"
+
+    class EmptyScripts:
+        def all(self) -> list[object]:
+            return []
+
+    class FakePage:
+        url = f"https://www.douyin.com/note/{video_key}"
+
+        def locator(self, selector: str) -> EmptyScripts:
+            assert selector == "script"
+            return EmptyScripts()
+
+    class FakeSession:
+        page = FakePage()
+
+        def __enter__(self) -> FakeSession:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def open(self, url: str, adapter: object, consume: object) -> None:
+            del url, adapter, consume
+
+        def raise_if_response_failed(self) -> None:
+            pass
+
+    monkeypatch.setattr(runner, "BrowserSession", FakeSession)
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("login_failed"))._browse(
+        PilotRequest(
+            platform="douyin",
+            url=f"https://www.douyin.com/video/{video_key}",
+            video_key=video_key,
+        ),
+        tmp_path,
+    )
+
+    assert result.status == "login_failed"
+
+
+def test_douyin_note_fallback_rejects_delayed_conflicting_video_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video_key = "7208863848449756475"
+    script_text = douyin_note_script(video_key)
+    comments_payload = json.loads(
+        (Path(__file__).parent / "fixtures/douyin/comments.json").read_text(encoding="utf-8")
+    )
+    delayed_video = json.loads(
+        (Path(__file__).parent / "fixtures/douyin/video.json").read_text(encoding="utf-8")
+    )
+    delayed_video["aweme_detail"]["aweme_id"] = video_key
+    delayed_video["aweme_detail"]["author"]["sec_uid"] = "conflicting-author"
+
+    class ScriptLocator:
+        def text_content(self) -> str:
+            return script_text
+
+    class ScriptList:
+        def all(self) -> list[ScriptLocator]:
+            return [ScriptLocator()]
+
+    class FakePage:
+        url = f"https://www.douyin.com/note/{video_key}"
+
+        def locator(self, selector: str) -> ScriptList:
+            assert selector == "script"
+            return ScriptList()
+
+    class FakeSession:
+        page = FakePage()
+        callback: Callable[[str, object], None]
+
+        def __enter__(self) -> FakeSession:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def open(self, url: str, adapter: object, consume: object) -> None:
+            del url, adapter
+            self.callback = cast(Callable[[str, object], None], consume)
+            self.callback("https://www.douyin.com/aweme/v1/web/comment/list", comments_payload)
+
+        def raise_if_response_failed(self) -> None:
+            pass
+
+        def wait_for_response_processing(self) -> None:
+            pass
+
+    session = FakeSession()
+    monkeypatch.setattr(runner, "BrowserSession", lambda: session)
+
+    def emit_conflict(page: object, stratum: object) -> str:
+        del page, stratum
+        session.callback("https://www.douyin.com/aweme/v1/web/aweme/detail", delayed_video)
+        return "performed"
+
+    monkeypatch.setattr(runner, "perform_stratum_action", emit_conflict)
+
+    result = BrowserVideoCollector(supervisor=SequenceSupervisor("ready"))._browse(
+        PilotRequest(
+            platform="douyin",
+            url=f"https://www.douyin.com/video/{video_key}",
+            video_key=video_key,
+        ),
+        tmp_path,
+    )
+
+    assert result.status == "response_shape_changed"
+
+
+def test_douyin_note_fallback_waits_for_successful_challenge_recheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    video_key = "7208863848449756475"
+    script_text = douyin_note_script(video_key)
+    challenge_attempted = False
+
+    class ScriptLocator:
+        def text_content(self) -> str:
+            return script_text
+
+    class ScriptList:
+        def all(self) -> list[ScriptLocator]:
+            return [ScriptLocator()] if challenge_attempted else []
+
+    class FakePage:
+        url = f"https://www.douyin.com/note/{video_key}"
+
+        def locator(self, selector: str) -> ScriptList:
+            assert selector == "script"
+            return ScriptList()
+
+    class FakeSession:
+        page = FakePage()
+
+        def __enter__(self) -> FakeSession:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+        def open(self, url: str, adapter: object, consume: object) -> None:
+            del url, adapter, consume
+
+        def raise_if_response_failed(self) -> None:
+            pass
+
+    class FakeChallengeHandler:
+        def __init__(self, directory: Path, *, confirm: Callable[[], bool]) -> None:
+            del directory
+            assert confirm() is True
+
+        def attempt(self, page: object, action: object) -> ChallengeResult:
+            nonlocal challenge_attempted
+            del page, action
+            challenge_attempted = True
+            return ChallengeResult("attempted")
+
+    monkeypatch.setattr(runner, "BrowserSession", FakeSession)
+    monkeypatch.setattr(runner, "ChallengeHandler", FakeChallengeHandler)
+    monkeypatch.setattr(runner, "perform_stratum_action", lambda page, stratum: "unavailable")
+
+    result = BrowserVideoCollector(
+        supervisor=SequenceSupervisor("ready", "ready"),
+        challenge_action=ClickAction((10, 20)),
+        challenge_confirm=lambda: True,
+    )._browse(
+        PilotRequest(
+            platform="douyin",
+            url=f"https://www.douyin.com/video/{video_key}",
+            video_key=video_key,
+        ),
+        tmp_path,
+    )
+
+    assert challenge_attempted is True
+    assert result.status == "partial"
+    assert result.video is not None
+    assert result.video.raw_video_id == video_key
 
 
 @pytest.mark.parametrize(

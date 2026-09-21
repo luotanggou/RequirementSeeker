@@ -965,6 +965,111 @@ def _bilibili_video_from_page(
         raise ResponseShapeChanged("response_shape_changed") from None
 
 
+def _douyin_note_video_from_page(
+    page: Page, request: PilotRequest, adapter: DouyinAdapter
+) -> RawVideo:
+    try:
+        parsed_url = urlsplit(str(getattr(page, "url", "")))
+        requested_url = urlsplit(str(request.url))
+        path_parts = parsed_url.path.split("/")
+        if len(path_parts) == 4 and path_parts[-1] == "":
+            path_parts.pop()
+        requested_parts = requested_url.path.split("/")
+        if len(requested_parts) == 4 and requested_parts[-1] == "":
+            requested_parts.pop()
+        if (
+            parsed_url.scheme != "https"
+            or parsed_url.hostname not in {"douyin.com", "www.douyin.com"}
+            or len(path_parts) != 3
+            or path_parts[:2] != ["", "note"]
+            or requested_url.scheme != "https"
+            or requested_url.hostname not in {"douyin.com", "www.douyin.com"}
+            or len(requested_parts) != 3
+            or requested_parts[1] not in {"video", "note"}
+        ):
+            raise ResponseShapeChanged("response_shape_changed")
+        extracted_key = path_parts[2]
+        original_key = requested_parts[2]
+        requested_key = request.video_key
+        if (
+            unquote(extracted_key) != extracted_key
+            or not video_key_is_safe(extracted_key)
+            or unquote(original_key) != original_key
+            or not video_key_is_safe(original_key)
+            or original_key != extracted_key
+            or (requested_key is not None and requested_key != extracted_key)
+        ):
+            raise ResponseShapeChanged("response_shape_changed")
+        video_key = requested_key or extracted_key
+        candidates: list[RawVideo] = []
+        prefix = "self.__pace_f.push("
+        for script in page.locator("script").all():
+            text = script.text_content()
+            if not isinstance(text, str) or video_key not in text or not text.startswith(prefix):
+                continue
+            if not text.endswith(")"):
+                raise ResponseShapeChanged("response_shape_changed")
+            outer = json.loads(text[len(prefix) : -1])
+            if (
+                not isinstance(outer, list)
+                or len(outer) != 2
+                or type(outer[0]) is not int
+                or outer[0] != 1
+                or not isinstance(outer[1], str)
+            ):
+                raise ResponseShapeChanged("response_shape_changed")
+            label, separator, encoded_component = outer[1].partition(":")
+            if separator != ":" or not label.isdecimal():
+                raise ResponseShapeChanged("response_shape_changed")
+            component = json.loads(encoded_component)
+            if not isinstance(component, list) or len(component) != 4:
+                continue
+            props = component[3]
+            if not isinstance(props, Mapping) or props.get("awemeId") != video_key:
+                continue
+            aweme = props.get("aweme")
+            if (
+                not isinstance(aweme, Mapping)
+                or type(aweme.get("statusCode")) is not int
+                or aweme.get("statusCode") != 0
+            ):
+                raise ResponseShapeChanged("response_shape_changed")
+            detail = aweme.get("detail")
+            if not isinstance(detail, Mapping) or detail.get("awemeId") != video_key:
+                raise ResponseShapeChanged("response_shape_changed")
+            author = detail.get("authorInfo")
+            stats = detail.get("stats")
+            if not isinstance(author, Mapping) or not isinstance(stats, Mapping):
+                raise ResponseShapeChanged("response_shape_changed")
+            normalized = {
+                "status_code": 0,
+                "aweme_detail": {
+                    "aweme_id": detail.get("awemeId"),
+                    "author": {
+                        "sec_uid": author.get("secUid"),
+                        "uid": author.get("uid"),
+                        "follower_count": author.get("followerCount"),
+                    },
+                    "statistics": {
+                        "comment_count": stats.get("commentCount"),
+                        "play_count": stats.get("playCount"),
+                        "digg_count": stats.get("diggCount"),
+                        "collect_count": stats.get("collectCount"),
+                        "share_count": stats.get("shareCount"),
+                    },
+                    "desc": detail.get("desc"),
+                    "create_time": detail.get("createTime"),
+                    "duration": None,
+                },
+            }
+            candidates.append(adapter.parse_video_response(normalized).video)
+        if len(candidates) != 1:
+            raise ResponseShapeChanged("response_shape_changed")
+        return candidates[0]
+    except Exception:
+        raise ResponseShapeChanged("response_shape_changed") from None
+
+
 def collect_from_page(
     local_url: str,
     adapter: PlatformAdapter,
@@ -1277,6 +1382,11 @@ class BrowserVideoCollector:
                     and parsed_video.raw_author_id != comment_context.video_author_id
                 ):
                     raise ResponseShapeChanged("response_shape_changed")
+                if video is not None and (
+                    parsed_video.raw_video_id != video.raw_video_id
+                    or parsed_video.raw_author_id != video.raw_author_id
+                ):
+                    raise ResponseShapeChanged("response_shape_changed")
                 video = parsed_video
                 while pending:
                     pending_payload, pending_stratum = pending.pop(0)
@@ -1308,6 +1418,22 @@ class BrowserVideoCollector:
                 pending_payload, pending_stratum = pending.pop(0)
                 parse_comments(pending_payload, pending_stratum)
 
+        def establish_page_fallback(page: Page, *, allow_douyin_note: bool = False) -> None:
+            nonlocal video
+            establish_bilibili_fallback(page)
+            if not allow_douyin_note or video is not None or not isinstance(adapter, DouyinAdapter):
+                return
+            try:
+                page_path = urlsplit(str(getattr(page, "url", ""))).path
+            except ValueError:
+                return
+            if not page_path.startswith("/note/"):
+                return
+            video = _douyin_note_video_from_page(page, request, adapter)
+            while pending:
+                pending_payload, pending_stratum = pending.pop(0)
+                parse_comments(pending_payload, pending_stratum)
+
         def explicitly_exhausted() -> bool:
             return bool(performed_strata) and all(
                 stratum in latest_pages and not latest_pages[stratum][0]
@@ -1334,15 +1460,16 @@ class BrowserVideoCollector:
             with browser_session as session:
                 session.open(str(request.url), adapter, consume)
                 session.raise_if_response_failed()
-                establish_bilibili_fallback(session.page)
+                establish_page_fallback(session.page)
                 supervision_status = self._supervisor.wait_for_ready(
                     session.page, self._supervision_timeout_seconds
                 )
                 session.raise_if_response_failed()
-                establish_bilibili_fallback(session.page)
                 if supervision_status != "ready":
                     status = supervision_status
-                elif self._challenge_action is not None:
+                elif self._challenge_action is None:
+                    establish_page_fallback(session.page, allow_douyin_note=True)
+                if status == "success" and self._challenge_action is not None:
                     if not _challenge_id_is_safe(self._challenge_id):
                         status = "challenge_unresolved"
                     else:
@@ -1368,6 +1495,8 @@ class BrowserVideoCollector:
                                     session.page, self._supervision_timeout_seconds
                                 )
                                 session.raise_if_response_failed()
+                                if status == "ready":
+                                    establish_page_fallback(session.page, allow_douyin_note=True)
                 if status == "success" or status == "ready":
                     status = "success"
                     for stratum in _STRATA:
@@ -1378,8 +1507,8 @@ class BrowserVideoCollector:
                             performed_strata.add(stratum)
                             sort_modes.append(stratum)
                             session.wait_for_response_processing()
-                            establish_bilibili_fallback(session.page)
-                    establish_bilibili_fallback(session.page)
+                            establish_page_fallback(session.page, allow_douyin_note=True)
+                    establish_page_fallback(session.page, allow_douyin_note=True)
                     if video is not None and latest_pages:
                         target = collection_target(video.total_comment_count).target
                         no_progress_rounds = 0
@@ -1399,7 +1528,7 @@ class BrowserVideoCollector:
                                     if stratum not in sort_modes:
                                         sort_modes.append(stratum)
                                     session.wait_for_response_processing()
-                                    establish_bilibili_fallback(session.page)
+                                    establish_page_fallback(session.page, allow_douyin_note=True)
                                     if len(unique_comment_ids) >= target:
                                         break
                                     if explicitly_exhausted():
