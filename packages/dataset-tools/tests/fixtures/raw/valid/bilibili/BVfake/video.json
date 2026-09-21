@@ -1,0 +1,16 @@
+{
+  "platform": "bilibili",
+  "raw_video_id": "BVfake",
+  "raw_author_id": "video-author",
+  "title": "人工测试视频",
+  "description": "不包含真实用户数据",
+  "published_at": "2026-09-08T02:00:00Z",
+  "duration_seconds": 120,
+  "total_comment_count": 2,
+  "view_count": 1000,
+  "like_count": 100,
+  "favorite_count": 50,
+  "share_count": 10,
+  "author_follower_count": 5000,
+  "captured_at": "2026-09-09T01:00:00Z"
+}

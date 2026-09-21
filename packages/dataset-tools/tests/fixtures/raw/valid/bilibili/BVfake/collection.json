@@ -1,0 +1,10 @@
+{
+  "reported_total": 2,
+  "collected_total": 2,
+  "pages_requested": 1,
+  "pages_succeeded": 1,
+  "sort_modes": ["top", "replies"],
+  "collection_started_at": "2026-09-09T01:00:00Z",
+  "collection_finished_at": "2026-09-09T02:00:00Z",
+  "collection_errors": []
+}
