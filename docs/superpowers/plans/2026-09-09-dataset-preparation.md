@@ -423,7 +423,7 @@ git commit -m "feat(dataset): sanitize and split collected videos"
 - Create: `packages/dataset-tools/src/requirementseeker_dataset/labels.py`
 - Create: `packages/dataset-tools/tests/test_labels.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_export_contains_no_semantic_prefill(tmp_path: Path) -> None:
@@ -443,15 +443,15 @@ def test_dispute_requires_two_independent_annotations_and_adjudication() -> None
     assert validate_labels(adjudicated_dispute()).evaluation_eligible is True
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_labels.py -q`
 
 Expected: labels module import fails.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
-`export_labels` reads only sanitized IDs/text and the matching `sampling-manifest.json`, then emits one annotation file per video with explicit `unlabeled` fields and an empty cluster list. `validate_labels` rejects unknown enum values through Pydantic, raw-ID patterns, duplicate comments, cluster members outside the file video, duplicate cluster membership, incomplete required fields, and disputed records without two distinct annotator IDs plus an adjudicator decision.
+`export_labels` reads only sanitized IDs/text and the matching `sampling-manifest.json`, then emits one annotation file per video with the sanitized comment text, explicit `unlabeled` fields and an empty cluster list. The text is required so a human can actually perform the annotation; no raw field or model-generated semantic conclusion is added. `validate_labels` rejects unknown enum values through Pydantic, raw-ID patterns, duplicate comments, cluster members outside the file video, duplicate cluster membership, incomplete required fields, and disputed records without two distinct annotator IDs plus an adjudicator decision.
 
 ```python
 def validate_cluster(annotation: AnnotationFile, cluster: ClusterLabel) -> None:
@@ -468,13 +468,13 @@ def evaluation_eligible(annotation: AnnotationFile, adjudication: AdjudicationFi
     return adjudication is not None and len(set(adjudication.annotator_ids)) == 2 and adjudication.decision is not None
 ```
 
-- [ ] **Step 4: Run label tests**
+- [x] **Step 4: Run label tests**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_labels.py -q`
 
 Expected: blank export and closed validation tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/dataset-tools/src/requirementseeker_dataset/labels.py packages/dataset-tools/tests/test_labels.py
