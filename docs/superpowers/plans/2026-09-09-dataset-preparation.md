@@ -530,14 +530,14 @@ git add packages/dataset-tools
 git commit -m "feat(dataset): expose safe preparation CLI"
 ```
 
-- [ ] **Step 6: Run the tool on the two approved local pilot directories**
+- [x] **Step 6: Run the tool on the two approved local pilot directories**
 
 Set the dataset secret only in the current process environment, run `sanitize`, then `export-labels`. Do not print the environment value. Open sanitized `video.json`, `comments.jsonl`, `sanitization.json` and label template in visible VS Code.
 
-- [ ] **Step 7: Record the pilot result**
+- [x] **Step 7: Record the pilot result**
 
 Write counts, replacement categories, review-item counts, split assignment, failures and next action to `docs/execution/2026-09-09.md`; do not include raw IDs, raw text or the secret.
 
-- [ ] **Step 8: Run the approved 24-video batch**
+- [x] **Step 8: Run the approved 24-video batch**
 
 After both platform pilots and the complete package gate pass, run `sanitize` and `export-labels` on the exact 24-entry approved manifest. Verify 24 sanitized directories, a stable 10/7/7 split, 5,090 input comment records accounted for, no raw IDs or secret values in output, and an explicit `unlabeled` annotation template for every sanitized comment. Record only aggregate counts, review categories, safe failure codes and output hashes in the local execution log.
