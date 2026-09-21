@@ -1155,12 +1155,18 @@ def test_live_douyin_note_collector_falls_back_to_strict_flight_metadata(
     script_text = douyin_note_script(video_key)
 
     class ScriptLocator:
+        def __init__(self, content: str = script_text) -> None:
+            self.content = content
+
         def text_content(self) -> str:
-            return script_text
+            return self.content
 
     class ScriptList:
         def all(self) -> list[ScriptLocator]:
-            return [ScriptLocator()]
+            unrelated = ScriptLocator(
+                'self.__pace_f.push([1,"%7B%22pathname%22%3A%22%2Fnote%2F' + video_key + '%22%7D"])'
+            )
+            return [unrelated, ScriptLocator()]
 
     class FakePage:
         url = f"https://www.douyin.com/note/{video_key}"

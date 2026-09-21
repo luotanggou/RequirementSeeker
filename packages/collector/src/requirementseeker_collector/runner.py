@@ -1020,7 +1020,7 @@ def _douyin_note_video_from_page(
                 raise ResponseShapeChanged("response_shape_changed")
             label, separator, encoded_component = outer[1].partition(":")
             if separator != ":" or not label.isdecimal():
-                raise ResponseShapeChanged("response_shape_changed")
+                continue
             component = json.loads(encoded_component)
             if not isinstance(component, list) or len(component) != 4:
                 continue
