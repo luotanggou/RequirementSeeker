@@ -76,7 +76,7 @@ class CollectionInput(RawContract):
     collected_total: NonNegativeInt
     pages_requested: NonNegativeInt
     pages_succeeded: NonNegativeInt
-    sort_modes: list[Identifier]
+    sort_modes: list[SamplingStratum]
     collection_started_at: Timestamp
     collection_finished_at: Timestamp
     collection_errors: list[CollectionErrorInput]

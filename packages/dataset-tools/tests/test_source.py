@@ -128,6 +128,16 @@ def test_invalid_json_is_rejected_without_echoing_content(tmp_path: Path) -> Non
     assert marker not in str(caught.value)
 
 
+def test_collection_sort_modes_accept_only_known_strata(tmp_path: Path) -> None:
+    directory = _copy_valid(tmp_path)
+    collection = _load_json(directory / "collection.json")
+    collection["sort_modes"] = ["raw-private-marker"]
+    _write_json(directory / "collection.json", collection)
+
+    with pytest.raises(RawDatasetError, match="raw_collection_invalid"):
+        read_raw_video(directory)
+
+
 @pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
 def test_unicode_line_separators_inside_text_are_preserved(tmp_path: Path, separator: str) -> None:
     directory = _copy_valid(tmp_path)

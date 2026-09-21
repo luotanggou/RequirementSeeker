@@ -1,0 +1,13 @@
+{
+  "manifest_version": "1.0",
+  "videos": [
+    {
+      "platform": "bilibili",
+      "video_key": "BVfake",
+      "url": "https://www.bilibili.com/video/BVfake",
+      "direction": "software_tools",
+      "comment_scale": "up_to_200"
+    }
+  ],
+  "unavailable_platforms": []
+}
