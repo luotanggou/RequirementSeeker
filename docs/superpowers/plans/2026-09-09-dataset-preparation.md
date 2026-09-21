@@ -491,7 +491,7 @@ git commit -m "feat(dataset): export and validate human labels"
 - Local only: `.local-data/m2-real/labels/`
 - Local only: `docs/execution/2026-09-09.md`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_cli_reads_secret_by_environment_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -503,27 +503,27 @@ def test_cli_reads_secret_by_environment_name(tmp_path: Path, monkeypatch: pytes
 
 def test_cli_never_accepts_secret_value_argument(parser: ArgumentParser) -> None:
     help_text = parser.format_help()
-    assert "--secret" not in help_text
+    assert "--secret " not in help_text
     assert "--secret-env" in help_text
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_cli.py -q`
 
 Expected: CLI import fails.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add the exact three commands from the approved spec. All commands emit ASCII summary JSON containing paths, counts, versions and safe error codes only. README documents environment-variable setup without sample secret values, local-only outputs, manual review, split semantics and the prohibition on automatic gold labels.
 
-- [ ] **Step 4: Run the complete package gate**
+- [x] **Step 4: Run the complete package gate**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests -q && uv run --project packages/dataset-tools ruff check packages/dataset-tools && uv run --project packages/dataset-tools ruff format --check packages/dataset-tools && uv run --project packages/dataset-tools mypy --config-file packages/dataset-tools/pyproject.toml packages/dataset-tools/src && uv lock --project packages/dataset-tools --check && uv build --project packages/dataset-tools && git diff --check`
 
 Expected: all tests, lint, format, types, lock and build pass; package imports neither collector nor Agent.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/dataset-tools
