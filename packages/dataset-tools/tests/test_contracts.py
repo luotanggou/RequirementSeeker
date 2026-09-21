@@ -85,7 +85,7 @@ def test_sanitization_report_review_count_matches_safe_items() -> None:
 
 
 def test_label_template_uses_explicit_unlabeled_values() -> None:
-    item = CommentLabel.unlabeled(COMMENT_ID)
+    item = CommentLabel.unlabeled(COMMENT_ID, "需要离线处理")
 
     assert item.need_signal == "unlabeled"
     assert item.signal_kind == "unlabeled"
@@ -207,7 +207,7 @@ def test_review_annotation_and_adjudication_contracts_are_explicit() -> None:
         field="text",
         reason="possible_precise_address",
     )
-    label = CommentLabel.unlabeled(COMMENT_ID)
+    label = CommentLabel.unlabeled(COMMENT_ID, "需要离线处理")
     cluster = ClusterLabel(
         cluster_id="cluster-1",
         normalized_need="离线处理评论",

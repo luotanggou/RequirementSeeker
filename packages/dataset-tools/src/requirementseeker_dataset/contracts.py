@@ -237,6 +237,7 @@ class CommentLabel(Contract):
     """单条评论的人工语义标签；模板必须显式保持未标注。"""
 
     comment_id: PseudonymousCommentId
+    text: Text
     need_signal: NeedSignal
     signal_kind: SignalKind
     normalized_need: str | None
@@ -244,9 +245,10 @@ class CommentLabel(Contract):
     video_reception: VideoReception
 
     @classmethod
-    def unlabeled(cls, comment_id: str) -> Self:
+    def unlabeled(cls, comment_id: str, text: str) -> Self:
         return cls(
             comment_id=comment_id,
+            text=text,
             need_signal="unlabeled",
             signal_kind="unlabeled",
             normalized_need=None,
