@@ -118,7 +118,7 @@ Copy M2's cross-field invariants into this file-contract model and test them: su
 
 - [x] **Step 4: Run tests and quality checks**
 
-Run: `uv sync --project packages/dataset-tools && uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_contracts.py -q && uv run --project packages/dataset-tools ruff check packages/dataset-tools && uv run --project packages/dataset-tools mypy packages/dataset-tools/src`
+Run: `uv sync --project packages/dataset-tools && uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_contracts.py -q && uv run --project packages/dataset-tools ruff check packages/dataset-tools && uv run --project packages/dataset-tools mypy --config-file packages/dataset-tools/pyproject.toml packages/dataset-tools/src`
 
 Expected: contract tests pass; package has no dependency on collector or Agent.
 
@@ -137,7 +137,7 @@ git commit -m "feat(dataset): add sanitized and annotation contracts"
 - Create: `packages/dataset-tools/tests/fixtures/raw/invalid/`
 - Create: `packages/dataset-tools/tests/test_source.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_source_reads_exact_three_file_directory() -> None:
@@ -152,13 +152,13 @@ def test_invalid_raw_directory_is_rejected(case: str) -> None:
         read_raw_video(FIXTURES / "raw/invalid" / case)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_source.py -q`
 
 Expected: source reader import fails.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Copy the approved raw JSON Schemas into test resources or define equivalent private input models; do not import `packages/collector`. Require exactly `video.json`, `comments.jsonl`, `collection.json`; validate extra fields, counts, unique IDs, parent self-reference, platform directory and filename encoding before returning immutable `RawVideoBundle`.
 
@@ -174,13 +174,13 @@ def read_raw_video(directory: Path) -> RawVideoBundle:
     return RawVideoBundle(video, comments, collection)
 ```
 
-- [ ] **Step 4: Run source tests**
+- [x] **Step 4: Run source tests**
 
 Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_source.py -q`
 
 Expected: valid fixture loads; all invalid fixtures fail with specific safe codes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/dataset-tools/src/requirementseeker_dataset/source.py packages/dataset-tools/tests/fixtures packages/dataset-tools/tests/test_source.py
@@ -405,7 +405,7 @@ Use sibling staging and backup directories with the same restore behavior as the
 
 - [ ] **Step 4: Run pipeline tests and checks**
 
-Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_sanitize.py packages/dataset-tools/tests/test_split.py -q && uv run --project packages/dataset-tools ruff check packages/dataset-tools && uv run --project packages/dataset-tools mypy packages/dataset-tools/src`
+Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests/test_sanitize.py packages/dataset-tools/tests/test_split.py -q && uv run --project packages/dataset-tools ruff check packages/dataset-tools && uv run --project packages/dataset-tools mypy --config-file packages/dataset-tools/pyproject.toml packages/dataset-tools/src`
 
 Expected: raw IDs/secrets are absent and stable split passes.
 
@@ -518,7 +518,7 @@ Add the exact three commands from the approved spec. All commands emit ASCII sum
 
 - [ ] **Step 4: Run the complete package gate**
 
-Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests -q && uv run --project packages/dataset-tools ruff check packages/dataset-tools && uv run --project packages/dataset-tools ruff format --check packages/dataset-tools && uv run --project packages/dataset-tools mypy packages/dataset-tools/src && uv lock --project packages/dataset-tools --check && uv build --project packages/dataset-tools && git diff --check`
+Run: `uv run --project packages/dataset-tools pytest packages/dataset-tools/tests -q && uv run --project packages/dataset-tools ruff check packages/dataset-tools && uv run --project packages/dataset-tools ruff format --check packages/dataset-tools && uv run --project packages/dataset-tools mypy --config-file packages/dataset-tools/pyproject.toml packages/dataset-tools/src && uv lock --project packages/dataset-tools --check && uv build --project packages/dataset-tools && git diff --check`
 
 Expected: all tests, lint, format, types, lock and build pass; package imports neither collector nor Agent.
 
